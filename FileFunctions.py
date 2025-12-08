@@ -9,6 +9,7 @@ class Pasta:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.dir = os.path.join(base_dir, *caminho)
         self.lista_arquivos = sorted(glob.glob(os.path.join(self.dir, "*")))
+        self.quantidade_arquivos = len(self.lista_arquivos)
 
     def atualizar (self):
         self.lista_arquivos = sorted(glob.glob(os.path.join(self.dir, "*")))

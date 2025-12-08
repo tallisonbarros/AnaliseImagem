@@ -1,6 +1,9 @@
 # ------------------- ProcessImageFunctions.py
 import os
 import cv2
+import random
+import ImageFunctions
+import tkinter.messagebox as mb
 
 def converter_pretoebranco(Imagem):
     if not Imagem.valida:
@@ -26,3 +29,23 @@ def contar_pixel_hsv(Imagem, hsv_min, hsv_max):
         "percentual": porcentagem,
         "mascara": mascara
     }
+
+
+
+def analisar(self):
+    # Só pra testar: gera três números aleatórios que somam 100
+    img = ImageFunctions.Imagem(self.imagem_atual)
+    hsv = {}
+    for categoria, campos in self.preprocess_inputs.items():
+        hsv[categoria] = {}
+
+        for comp, (entry_min, entry_max) in campos.items():
+            try:
+                    vmin = int(entry_min.get())
+                    vmax = int(entry_max.get())
+            except:
+                    vmin, vmax = 0, 255
+
+            hsv[categoria][comp] = (vmin, vmax)
+
+    mb.showinfo("HSV COLETADO", hsv)       

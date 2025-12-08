@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import messagebox
+import tkinter.messagebox as mb
 import os
 import cv2  # ✔ IMPORT NECESSÁRIO PARA PROCESSAMENTO DAS IMAGENS
 import UiFunctions
@@ -35,7 +35,7 @@ def carregar_proxima_nao_classificada():
 
         # 3) Verificar se há arquivos
         if not pasta_nc.lista_arquivos:
-            messagebox.showinfo("Fim", "Nenhuma imagem não classificada encontrada.")
+            mb.showinfo("Fim", "Nenhuma imagem não classificada encontrada.")
             imagem_atual_caminho = None
             limpar_ui_fim()
             return
@@ -48,7 +48,7 @@ def carregar_proxima_nao_classificada():
         img = ImageFunctions.Imagem(caminho)
 
         if not img.valida:
-            messagebox.showerror("Erro", img.erro)
+            mb.showerror("Erro", img.erro)
             return
 
         # 6) Exibir imagem na UI
@@ -59,7 +59,7 @@ def carregar_proxima_nao_classificada():
             widget.grid()
 
     except Exception as e:
-        messagebox.showerror("Erro inesperado", str(e))
+        mb.showerror("Erro inesperado", str(e))
 
 
 
@@ -68,7 +68,7 @@ def classificar_imagem(classe):
     global imagem_atual_caminho
 
     if not imagem_atual_caminho:
-        messagebox.showwarning("Aviso", "Nenhuma imagem carregada para classificar.")
+        mb.showwarning("Aviso", "Nenhuma imagem carregada para classificar.")
         return
 
     try:
@@ -81,11 +81,11 @@ def classificar_imagem(classe):
         resultado = FileFunctions.MoverArquivo(imagem_atual_caminho, destino_pasta)
 
         if not resultado["ok"]:
-            messagebox.showerror("Erro ao mover arquivo", resultado["erro"])
+            mb.showerror("Erro ao mover arquivo", resultado["erro"])
             return
 
         # Feedback ao usuário
-        messagebox.showinfo(
+        mb.showinfo(
             "Classificado!",
             f"A imagem foi movida para a classe {classe}.\n\nDestino:\n{resultado['destino']}"
         )
@@ -95,7 +95,7 @@ def classificar_imagem(classe):
         carregar_proxima_nao_classificada()
 
     except Exception as e:
-        messagebox.showerror("Erro inesperado", str(e))
+        mb.showerror("Erro inesperado", str(e))
 
 def criar_janela():
     global label_imagem_global
