@@ -5,6 +5,9 @@ import FileFunctions
 import ImageFunctions
 import ProcessImageFunctions
 import UiFunctions
+import numpy as np
+import cv2
+
 
 class ClassificadorUI:
     def __init__(self, root, dirDataBase):
@@ -21,7 +24,7 @@ class ClassificadorUI:
         botao_buscar = tk.Button(
             self.root,
             text="Buscar imagem",
-            command=self.buscar_imagem_not_class   # 👈 sem parâmetros
+            command=self.buscar_imagem_notclass   # 👈 sem parâmetros
         )
         # botao_buscar.pack(pady=5)
         
@@ -35,6 +38,8 @@ class ClassificadorUI:
 
         # Label onde exibe imagem
         self.label_imagem = tk.Label(self.root)
+        self.label_imagem.bind("<Button-1>", self.click_imagem)
+
 
         # Texto onde exibe directorio da imagem atual
         self.TxtDirImagem = tk.Label(
@@ -47,9 +52,25 @@ class ClassificadorUI:
             self.root,
             font=("Arial", 8)
         )
+
+        # Frame da análise automática
+        frame_analise = tk.Frame(self.root)
+        frame_analise.pack(side="right", padx=10, pady=10)
+
+        titulo2 = tk.Label(frame_analise, text="Análise automática", font=("Arial", 10, "bold"))
+        titulo2.pack()
+
+        self.lbl_germen  = tk.Label(frame_analise, text="Gérmen: -- %")
+        self.lbl_casca   = tk.Label(frame_analise, text="Casca: -- %")
+        self.lbl_canjica = tk.Label(frame_analise, text="Canjica: -- %")
+
+        self.lbl_germen.pack(anchor="w")
+        self.lbl_casca.pack(anchor="w")
+        self.lbl_canjica.pack(anchor="w")
+
         
 
-        self.root.after(300, self.buscar_imagem_not_class)
+        self.root.after(300, self.buscar_imagem_notclass)
         
         self.frame_classes = tk.Frame(self.root)
         
@@ -76,8 +97,12 @@ class ClassificadorUI:
         titulo = tk.Label(frame_preprocess, text="Pre Processamento", font=("Arial", 10, "bold"))
         titulo.pack()
         self.preprocess_inputs = UiFunctions.criar_input_preprocess(frame_preprocess)
+        
+        # self.HSVcor = tk.Label(frame_preprocess, text="Cor:", font=("Arial", 6, "bold"))
+       # self.HSVcor.pack()
+
  
-    def buscar_imagem_not_class(self):
+    def buscar_imagem_notclass(self):
             self.pasta_nc = FileFunctions.Pasta(self.dirDataBase, "ImgNotClass")
             self.pasta_nc.filtrar_arquivos(".png")
 
@@ -108,8 +133,8 @@ class ClassificadorUI:
             self.TxtDirImagem.config(text=img.nome)
             self.TxtQtdItens.config(text=str(self.pasta_nc.quantidade_arquivos) + " imagens para classificar.")
 
-            analise = ProcessImageFunctions.analisar(img.matriz_NumPy)
-            self.atualizar_painel_analise(analise)
+            self.analisar()
+
 
 
 
@@ -128,7 +153,7 @@ class ClassificadorUI:
             if not resultado["ok"]:
                 return
 
-            self.buscar_imagem_not_class()
+            self.buscar_imagem_notclass()
             return "OK"
 
         except Exception as e:
@@ -167,7 +192,7 @@ class ClassificadorUI:
             )
             # Recarrega fluxo normal
         
-        self.buscar_imagem_not_class()
+        self.buscar_imagem_notclass()
 
 
     def atualizar_painel_analise(self, resultado):
@@ -181,7 +206,48 @@ class ClassificadorUI:
 
 
     
-    def analisar (self):
-            resultado = ProcessImageFunctions.analisar(self)
+    def analisar (self):            
+            img = ImageFunctions.Imagem(self.imagem_atual)
+            #print("DEBUG inputs", self.preprocess_inputs)
+            resultado = ProcessImageFunctions.analisar(img, UiFunctions.coletar_hsv(self.preprocess_inputs))
+            print("DEBUG RESULTADO:", resultado)
+
             self.atualizar_painel_analise(resultado)
 
+
+
+
+    def click_imagem(self, event):
+        if self.imagem_atual is None:
+            return
+
+        # 1. Carrega imagem novamente
+        img = ImageFunctions.Imagem(self.imagem_atual)
+        matriz = img.matriz_NumPy
+
+        # Dimensões reais da imagem
+        h_real, w_real = matriz.shape[:2]
+
+        # Dimensões exibidas (350x350)
+        w_exib, h_exib = 350, 350
+
+        # 2. Converte coordenadas da UI → coordenadas reais
+        x = int(event.x * (w_real / w_exib))
+        y = int(event.y * (h_real / h_exib))
+
+        if x >= w_real or y >= h_real:
+            return
+
+        # 3. Captura pixel BGR
+        b, g, r = matriz[y, x]
+
+        # 4. Converte para HSV
+        pixel_hsv = cv2.cvtColor(
+            np.uint8([[[b, g, r]]]),
+            cv2.COLOR_BGR2HSV
+        )[0][0]
+
+        H, S, V = pixel_hsv
+
+        # 5. Atualiza o texto na interface
+        self.preprocess_inputs["HSVCor"].config(text=f"Cor HSV: H={H}  S={S}  V={V}")
