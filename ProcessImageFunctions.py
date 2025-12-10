@@ -29,20 +29,31 @@ def contar_pixel_hsv(Imagem, hsv_min, hsv_max):
         "mascara": mascara
     }
 
-def analisar(img, valoresHsv):
+def processar_valores_hsv(img, valoresHsv):
     if not img.valida:
         return {"erro": "imagem invalida"}
 
     resultados = {}
 
-    for categoria, hsv_dict in valoresHsv.items():
+    total_pixels = img.qtd_pixels()   # você deve ter essa função; senão eu te passo
 
-        hsv_min = hsv_dict["min"]
-        hsv_max = hsv_dict["max"]
+    for categoria, lista_faixas in valoresHsv.items():
 
-        info = contar_pixel_hsv(img, hsv_min, hsv_max)
+        soma_pixels_categoria = 0
 
-        resultados[categoria] = info["percentual"]
+        # percorre cada faixa cadastrada
+        for faixa in lista_faixas:
+            hsv_min = faixa["min"]
+            hsv_max = faixa["max"]
+
+            info = contar_pixel_hsv(img, hsv_min, hsv_max)
+
+            soma_pixels_categoria += info["pixels"]
+
+        # converte para percentual
+        percentual = (soma_pixels_categoria / total_pixels) * 100.0
+
+        resultados[categoria] = percentual
 
     return resultados
 

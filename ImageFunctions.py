@@ -60,3 +60,5 @@ class Imagem:
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
+    def qtd_pixels(self):
+        return self.matriz_NumPy.shape[0] * self.matriz_NumPy.shape[1]
