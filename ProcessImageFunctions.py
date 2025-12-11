@@ -1,59 +1,69 @@
 # ------------------- ProcessImageFunctions.py
-import os
 import cv2
-import random
-import ImageFunctions
-import tkinter.messagebox as mb
-
-def converter_pretoebranco(Imagem):
-    if not Imagem.valida:
-        print("Imagem Invalida")
-        return
-
-    Imagem.matriz_NumPy = cv2.cvtColor(Imagem.matriz_NumPy, cv2.COLOR_BGR2GRAY)
-    return Imagem
+import numpy as np
 
 def contar_pixel_hsv(Imagem, hsv_min, hsv_max):
-    if not Imagem.valida:
-        print("Imagem Invalida")
-        return
+    """Conta quantos pixels estão entre min/max usando HSV já pré-calculado."""
+    mascara = cv2.inRange(Imagem.hsv, hsv_min, hsv_max)
+    pixels = cv2.countNonZero(mascara)
+    return pixels
 
-    imagem_hsv = cv2.cvtColor(Imagem.matriz_NumPy, cv2.COLOR_BGR2HSV)
-    mascara = cv2.inRange(imagem_hsv, hsv_min, hsv_max)
-    mascara_pixels = cv2.countNonZero(mascara)
-    porcentagem = 100 * mascara_pixels / Imagem.total_pixels
 
-    return {
-        "pixels": mascara_pixels,
-        "percentual": porcentagem,
-        "mascara": mascara
-    }
+def gerar_faixas_hsv(paletas, tolerancia=0.10):
+    """
+    Gera faixas HSV com tolerância proporcional.
+    Exemplo: H=50 com tolerância 10% => faixa [45 ... 55]
+    """
+    faixas = {}
 
-def processar_valores_hsv(img, valoresHsv):
-    if not img.valida:
-        return {"erro": "imagem invalida"}
+    for categoria, dados in paletas.items():
+        if categoria == "HSVCor":
+            continue
 
+        if "cores" not in dados:
+            continue
+
+        cores = dados["cores"]
+        if not cores:
+            continue
+
+        lista_faixas = []
+
+        for (H, S, V) in cores:
+            # deltas proporcionais
+            h_delta = int(H * tolerancia)
+            s_delta = int(S * tolerancia)
+            v_delta = int(V * tolerancia)
+
+            h_min = max(H - h_delta, 0)
+            h_max = min(H + h_delta, 179)
+
+            s_min = max(S - s_delta, 0)
+            s_max = min(S + s_delta, 255)
+
+            v_min = max(V - v_delta, 0)
+            v_max = min(V + v_delta, 255)
+
+            lista_faixas.append({
+                "min": (h_min, s_min, v_min),
+                "max": (h_max, s_max, v_max)
+            })
+
+        faixas[categoria] = lista_faixas
+
+    return faixas
+
+
+def processar_valores_hsv(img, faixas):
+    """Processa valores HSV usando faixas geradas com tolerância."""
     resultados = {}
+    total = img.total_pixels
 
-    total_pixels = img.qtd_pixels()   # você deve ter essa função; senão eu te passo
-
-    for categoria, lista_faixas in valoresHsv.items():
-
-        soma_pixels_categoria = 0
-
-        # percorre cada faixa cadastrada
+    for categoria, lista_faixas in faixas.items():
+        soma = 0
         for faixa in lista_faixas:
-            hsv_min = faixa["min"]
-            hsv_max = faixa["max"]
+            soma += contar_pixel_hsv(img, faixa["min"], faixa["max"])
 
-            info = contar_pixel_hsv(img, hsv_min, hsv_max)
-
-            soma_pixels_categoria += info["pixels"]
-
-        # converte para percentual
-        percentual = (soma_pixels_categoria / total_pixels) * 100.0
-
-        resultados[categoria] = percentual
+        resultados[categoria] = (soma / total) * 100.0
 
     return resultados
-
