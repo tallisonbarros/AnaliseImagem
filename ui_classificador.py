@@ -6,6 +6,9 @@ import tkinter.messagebox as mb
 
 
 if __name__ == "__main__":
+    import sys
+    print("PYTHON EXECUTADO:", sys.executable)
+    print("PYTHONPATH:", sys.path)
   #  mb.showinfo("Título", "Iniciado")
     base_dir = os.path.dirname(os.path.abspath(__file__))
 

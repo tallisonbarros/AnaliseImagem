@@ -3,6 +3,7 @@ import cv2
 import tkinter as tk
 from PIL import Image, ImageTk
 import colorsys
+import FileFunctions
 
 
 def rgb_from_hsv_hex(H, S, V):
@@ -26,22 +27,25 @@ def exibir_canvas(canvas, pil_image, zoom, pan_x, pan_y):
     return img_tk
 
 
-class PaletaCategoriaCores:
+class PaletaMetaDados:
     def __init__(self, get_pickcolor_func, on_change=None):
         self.get_pickcolor = get_pickcolor_func
         self.on_change = on_change
         self.refs = {}
+        self.categorias = ["Germen", "Casca", "Canjica", "Exclusao"]
         self.HSVcor = None
+        self._hsv_circle = None
+        self._json_path = FileFunctions.caminho_config("PaletaMetaDados.json")
+        self.refs = self._carregar_paleta()
 
     def criar_paletas(self, frame_pai):
         bloco = tk.LabelFrame(frame_pai, text="Categorias analisadas", font=("Arial", 10, "bold"))
         bloco.pack(pady=10)
 
-        categorias = ["Germen", "Casca", "Canjica"]
-        self.refs = {}
-
-        for nome in categorias:
+        for nome in self.categorias:
             nome_low = nome.lower()
+            if nome_low not in self.refs:
+                self.refs[nome_low] = {"cores": []}
 
             linha = tk.Frame(bloco)
             linha.pack(anchor="w", pady=3)
@@ -68,22 +72,67 @@ class PaletaCategoriaCores:
             )
             btn_del.pack(side="left", padx=2)
 
-            self.refs[nome_low] = {
-                "cores": [],
-                "frame_cores": frame_cores
-            }
+            self.refs[nome_low]["frame_cores"] = frame_cores
+
+            for (H, S, V) in self.refs[nome_low]["cores"]:
+                cor_hex = rgb_from_hsv_hex(H, S, V)
+                tk.Label(
+                    frame_cores,
+                    bg=cor_hex,
+                    width=2,
+                    height=1,
+                    relief="ridge"
+                ).pack(side="left", padx=1)
 
         frame_pick = tk.Frame(bloco)
         frame_pick.pack(pady=5)
 
-        self.HSVcor = tk.Label(frame_pick, width=3, height=1, relief="solid", bg="#000000")
+        # Canvas pequeno com um circulo preenchido para exibir a cor escolhida
+        self.HSVcor = tk.Canvas(frame_pick, width=26, height=26, highlightthickness=0, highlightbackground="#000000")
+        self._hsv_circle = self.HSVcor.create_oval(3, 3, 23, 23, fill="#000000", outline="#000000", width=2)
         self.HSVcor.pack()
+
+        # inicializa com preto
+        self.atualizar_cor_preview("#000000")
 
         return self.refs
 
+    def _carregar_paleta(self):
+        dados_salvos = FileFunctions.ler_json(self._json_path, {}) or {}
+        # migra chave antiga "fundo" para "exclusao", se existir
+        if "exclusao" not in dados_salvos and "fundo" in dados_salvos:
+            dados_salvos["exclusao"] = dados_salvos.get("fundo", {})
+        refs = {}
+        for nome in self.categorias:
+            chave = nome.lower()
+            cores_salvas = dados_salvos.get(chave, {}).get("cores", [])
+            cores_validas = []
+            for cor in cores_salvas:
+                if not isinstance(cor, (list, tuple)) or len(cor) != 3:
+                    continue
+                try:
+                    h, s, v = map(int, cor)
+                    cores_validas.append((h, s, v))
+                except Exception:
+                    continue
+            refs[chave] = {"cores": cores_validas}
+        return refs
+
+    def _salvar_paleta(self):
+        dados = {}
+        for categoria, info in self.refs.items():
+            cores = info.get("cores", [])
+            dados[categoria] = {"cores": [list(map(int, cor)) for cor in cores]}
+        FileFunctions.salvar_json(self._json_path, dados)
+
+    def atualizar_cor_preview(self, cor_hex: str):
+        """Atualiza o circulo de preview com a cor fornecida em HEX."""
+        if self.HSVcor and self._hsv_circle:
+            self.HSVcor.itemconfig(self._hsv_circle, fill=cor_hex, outline="#000000")
+
     def cadastrar_cor(self, categoria):
         hsv = self.get_pickcolor()
-        if hsv is None:
+        if hsv is None or categoria not in self.refs:
             return
 
         H, S, V = map(int, hsv)
@@ -94,21 +143,28 @@ class PaletaCategoriaCores:
             self.refs[categoria]["frame_cores"],
             bg=cor_hex, width=2, height=1, relief="ridge"
         ).pack(side="left", padx=1)
+        self._salvar_paleta()
 
         if self.on_change:
             self.on_change()
 
     def remover_ultima_cor(self, categoria):
-        lista = self.refs[categoria]["cores"]
+        if categoria not in self.refs:
+            return
+
+        lista = self.refs[categoria].get("cores", [])
         if not lista:
             return
 
         lista.pop()
 
-        frame = self.refs[categoria]["frame_cores"]
-        filhos = frame.winfo_children()
-        if filhos:
-            filhos[-1].destroy()
+        frame = self.refs[categoria].get("frame_cores")
+        if frame:
+            filhos = frame.winfo_children()
+            if filhos:
+                filhos[-1].destroy()
+
+        self._salvar_paleta()
 
         if self.on_change:
             self.on_change()
@@ -135,11 +191,13 @@ class CanvasNavigator:
     def set_image(self, pil_image):
         self.img_original = pil_image
 
+        # garante que o canvas ja tenha tamanho real antes de calcular escala
+        self.canvas.update_idletasks()
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
         iw, ih = pil_image.size
 
-        escala = min(cw / iw, ch / ih, 1.0)
+        escala = min(cw / iw, ch / ih, 1.0)  
 
         self.zoom = escala
         self.pan_x = 0
