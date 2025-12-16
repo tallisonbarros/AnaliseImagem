@@ -3,3 +3,5 @@ ImgDataBase/
 sam_vit_h_4b8939.pth
 teste_sam2.py
 .venv/
+camadas_excluidas/
+dataset_quebra/

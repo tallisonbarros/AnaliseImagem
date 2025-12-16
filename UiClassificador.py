@@ -175,7 +175,7 @@ class ClassificadorUI:
             return
 
         # calcula composicao via IA antes de mover/salvar
-        comp = ProcessImageFunctions.analisar_composicao(self.img, self.paletas.refs) or {}
+        comp = ProcessImageFunctions.calcular_composicao(self.img, self.paletas.refs) or {}
 
         # grava historico em JSON/CSV
         registro = {
@@ -253,7 +253,7 @@ class ClassificadorUI:
             return
 
         pasta_destino = os.path.join(self.dirDataBase, "ImgNotClass")
-        salvos = ProcessImageFunctions.separar_componentes(self.img, pasta_destino, paletas=self.paletas.refs if self.paletas else None)
+        salvos = ProcessImageFunctions.separar_componentes_sam(self.img, pasta_destino, paletas=self.paletas.refs if self.paletas else None)
 
         if not salvos:
             mb.showinfo("Separar componentes", "Nenhuma camada salva.")
@@ -274,7 +274,7 @@ class ClassificadorUI:
 
     def analisar_composicao(self):
 
-        r = ProcessImageFunctions.analisar_composicao(self.img, self.paletas.refs)
+        r = ProcessImageFunctions.calcular_composicao(self.img, self.paletas.refs)
 
         self.lbl_g.config(text=f"Germen:   {r.get('germen', 0):.1f}%")
         self.lbl_c.config(text=f"Casca:    {r.get('casca', 0):.1f}%")
@@ -286,14 +286,14 @@ class ClassificadorUI:
     def analisar_score(self):
         if not self.img:
             return
-        score_info = ProcessImageFunctions.analisar_score(self.img, self.paletas.refs)
+        score_info = ProcessImageFunctions.calcular_score(self.img, self.paletas.refs)
         score_val = score_info.get("score", 0)
         self.lbl_deger.config(text=f"Score {score_val:.2f}")
 
     def analisar_quebra(self):
         if not self.img:
             return
-        q = ProcessImageFunctions.analisar_quebra(self.img)
+        q = ProcessImageFunctions.avaliar_quebra(self.img)
         score_q = q.get("score_quebra", 0.0)
         classe = q.get("classe", "indefinido")
         self.lbl_quebra.config(text=f"Quebra: {score_q:.2f} ({classe})")

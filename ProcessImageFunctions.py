@@ -58,14 +58,14 @@ _SAM_MODEL = None
 _SAM_AMG = None
 
 
-def contar_pixel_hsv(Imagem, hsv_min, hsv_max):
+def contar_pixels_hsv(Imagem, hsv_min, hsv_max):
     """Conta quantos pixels estao entre min/max usando HSV ja pre-calculado."""
     mascara = cv2.inRange(Imagem.hsv, hsv_min, hsv_max)
     pixels = cv2.countNonZero(mascara)
     return pixels
 
 
-def gerar_faixas_hsv(paletas, tolerancia=0.10):
+def gerar_faixas_por_paleta(paletas, tolerancia=0.10):
     faixas = {}
     for categoria, dados in paletas.items():
         if categoria == "HSVCor":
@@ -91,18 +91,37 @@ def gerar_faixas_hsv(paletas, tolerancia=0.10):
     return faixas
 
 
-def processar_valores_hsv(img, faixas):
+def calcular_percentuais_hsv(img, faixas):
     resultados = {}
     total = img.total_pixels
     for categoria, lista_faixas in faixas.items():
         soma = 0
         for faixa in lista_faixas:
-            soma += contar_pixel_hsv(img, faixa["min"], faixa["max"])
+            soma += contar_pixels_hsv(img, faixa["min"], faixa["max"])
         resultados[categoria] = (soma / total) * 100.0
     return resultados
 
 
-def analisar_composicao(img, paletas):
+def montar_faixas_por_categoria(paletas, categorias, tolerancia=0.10):
+    """Retorna faixas HSV apenas das categorias desejadas."""
+    if not paletas:
+        return {}
+    subset = {k: v for k, v in paletas.items() if k.lower() in categorias}
+    return gerar_faixas_por_paleta(subset, tolerancia=tolerancia)
+
+
+def gerar_mascara_por_faixas(hsv_img, faixas):
+    """Combina faixas HSV em uma unica mascara binaria."""
+    if not faixas:
+        return None
+    mask = np.zeros(hsv_img.shape[:2], dtype=np.uint8)
+    for faixa in faixas:
+        m = cv2.inRange(hsv_img, np.array(faixa["min"]), np.array(faixa["max"]))
+        mask = cv2.bitwise_or(mask, m)
+    return mask
+
+
+def calcular_composicao(img, paletas):
     """
     Classifica cada pixel via KNN no espaco HSV usando as cores de referencia das paletas.
     Retorna um dict com percentuais por categoria, considerando a maioria entre os K mais proximos.
@@ -241,12 +260,12 @@ def analisar_composicao(img, paletas):
     return resultados
 
 
-def analisar_score(img, paletas, composicao=None, pesos=None):
+def calcular_score(img, paletas, composicao=None, pesos=None):
     """
     Camada 2 - modelo estatistico ponderado para estimar score/nota a partir da composicao.
     Usa regressao linear sobre o historico salvo (Classificacoes.json). Se faltar base, usa pesos default.
     """
-    comp = composicao or analisar_composicao(img, paletas)
+    comp = composicao or calcular_composicao(img, paletas)
     if not comp:
         return {"score": 0.0, "metodo": "sem_dados"}
 
@@ -303,7 +322,7 @@ def analisar_score(img, paletas, composicao=None, pesos=None):
     return {"score": pred, "metodo": metodo, "composicao": comp}
 
 
-def analisar_quebra(img: ImageFunctions.Imagem):
+def avaliar_quebra(img: ImageFunctions.Imagem):
     """
     Avalia grau de quebra fisica usando metricas morfologicas/geomtricas.
     Retorna score (0-1), classificacao qualitativa e metricas auxiliares.
@@ -331,7 +350,7 @@ def analisar_quebra(img: ImageFunctions.Imagem):
     if img is None or getattr(img, "matriz_NumPy", None) is None:
         return {"score_quebra": 0.0, "classe": "indefinido", "metricas": {}}
 
-    mask = _gerar_mascara_fg(img.matriz_NumPy)
+    mask = gerar_mascara_fg(img.matriz_NumPy)
     if mask is None:
         return {"score_quebra": 0.0, "classe": "indefinido", "metricas": {}}
 
@@ -447,7 +466,7 @@ def analisar_quebra(img: ImageFunctions.Imagem):
     return {"score_quebra": score_cnn, "classe": classe, "metricas": metricas, "cnn": resultado_cnn}
 
 
-def _gerar_mascara_fg(img_bgr):
+def gerar_mascara_fg(img_bgr):
     """Mascara binaria simples: pixels non-zero sao foreground."""
     if img_bgr is None:
         return None
@@ -457,7 +476,7 @@ def _gerar_mascara_fg(img_bgr):
     return mask
 
 
-def _carregar_sam_base():
+def carregar_modelo_sam():
     global _SAM_MODEL
     if _SAM_MODEL is not None:
         return _SAM_MODEL
@@ -472,18 +491,18 @@ def _carregar_sam_base():
     return _SAM_MODEL
 
 
-def _carregar_sam_amg():
+def carregar_amg_sam():
     global _SAM_AMG
     if _SAM_AMG is not None:
         return _SAM_AMG
     if SamAutomaticMaskGenerator is None:
         raise RuntimeError("SamAutomaticMaskGenerator nao disponivel.")
-    sam_model = _carregar_sam_base()
+    sam_model = carregar_modelo_sam()
     _SAM_AMG = SamAutomaticMaskGenerator(sam_model, **SAM_AMG_CFG)
     return _SAM_AMG
 
 
-def _recortar_bbox(mask):
+def recortar_bbox(mask):
     coords = cv2.findNonZero(mask)
     if coords is None:
         return None
@@ -491,7 +510,7 @@ def _recortar_bbox(mask):
     return x, y, w, h
 
 
-def _enquadrar_quadrado(img_bgr, alvo=2500, margem=0.9):
+def enquadrar_em_quadrado(img_bgr, alvo=2500, margem=0.9):
     """
     Reenquadra em um quadro quadrado, aplicando auto zoom para ocupar a maior
     parte do alvo (deixa uma margem percentual).
@@ -517,7 +536,7 @@ def _enquadrar_quadrado(img_bgr, alvo=2500, margem=0.9):
     return canvas
 
 
-def _caminho_unico(base_path):
+def gerar_caminho_unico(base_path):
     if not os.path.exists(base_path):
         return base_path
     nome, ext = os.path.splitext(base_path)
@@ -529,7 +548,7 @@ def _caminho_unico(base_path):
         idx += 1
 
 
-def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, tamanho_alvo=2500, paletas=None):
+def separar_componentes_sam(imagem: ImageFunctions.Imagem, pasta_destino: str, tamanho_alvo=2500, paletas=None):
     """
     Usa o SAM (AutomaticMaskGenerator) para separar componentes e salva cada um
     como PNG reenquadrado em um quadro quadrado de tamanho_alvo.
@@ -538,7 +557,7 @@ def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, taman
         return []
 
     try:
-        amg = _carregar_sam_amg()
+        amg = carregar_amg_sam()
     except Exception as exc:  # noqa: BLE001
         mb.showerror("SAM nao disponivel", str(exc))
         return []
@@ -557,40 +576,43 @@ def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, taman
         return []
 
     os.makedirs(pasta_destino, exist_ok=True)
+    pasta_excluidas = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camadas_excluidas")
+    os.makedirs(pasta_excluidas, exist_ok=True)
     base_nome = os.path.splitext(imagem.nome)[0]
     salvos = []
 
-    def _calc_exclusao_ratio(mask_local, hsv_local):
-        cores_exc = []
-        for nome, dados in (paletas or {}).items():
-            key = (nome or "").lower()
-            if key in ("exclusao", "fundo"):
-                cores_exc.extend((dados or {}).get("cores", []))
-        if not cores_exc:
+    def calcular_ratio_exclusao(mask_local, hsv_local):
+        """Proporcao de pixels do componente que batem com as faixas de exclusao/fundo."""
+        faixas_exc = montar_faixas_por_categoria(paletas, {"exclusao", "fundo"}, tolerancia=0.45)
+        faixas_lista = []
+        for chave in ("exclusao", "fundo"):
+            faixas_lista.extend(faixas_exc.get(chave, []))
+        if not faixas_lista:
             return 0.0
-        mask_exc = np.zeros(mask_local.shape, dtype=np.uint8)
-        for (H, S, V) in cores_exc:
-            h_delta = int(max(5, H * 0.08))
-            s_delta = int(max(10, S * 0.10))
-            v_delta = int(max(10, V * 0.10))
-            h_min = max(H - h_delta, 0)
-            h_max = min(H + h_delta, 179)
-            s_min = max(S - s_delta, 0)
-            s_max = min(S + s_delta, 255)
-            v_min = max(V - v_delta, 0)
-            v_max = min(V + v_delta, 255)
-            faixa = cv2.inRange(hsv_local, (h_min, s_min, v_min), (h_max, s_max, v_max))
-            mask_exc = cv2.bitwise_or(mask_exc, faixa)
-        inter = np.logical_and(mask_local, mask_exc > 0)
-        return float(np.sum(inter)) / float(max(np.sum(mask_local), 1))
+        mask_exc = gerar_mascara_por_faixas(hsv_local, faixas_lista)
+        if mask_exc is None:
+            return 0.0
+        # usa somente pixels do componente com V>0 como base (ignora transparencia/fundo preto fora do recorte)
+        mask_comp = mask_local.astype(bool)
+        mask_validos = np.logical_and(mask_comp, hsv_local[:, :, 2] > 0)
+        area_base = float(np.sum(mask_validos))
+        if area_base == 0:
+            return 0.0
+        inter = np.logical_and(mask_validos, mask_exc > 0)
+        return float(np.sum(inter)) / area_base
 
-    def _avaliar_mask(mask_local, rec_local):
+    def validar_mascara_componente(mask_local, rec_local):
+        """Aplica a sequencia de filtros locais: area, forma e conteudo HSV."""
         area_total = rec_local.shape[0] * rec_local.shape[1]
         if area_total == 0:
             return False
+
+        # Filtro 1 - area minima de mascara
         area_mask = mask_local.sum()
         if area_mask < 0.05 * area_total:
             return False
+
+        # Filtro 2 - forma compacta via convexidade
         contours, _ = cv2.findContours(
             mask_local.astype(np.uint8) * 255,
             cv2.RETR_EXTERNAL,
@@ -607,6 +629,8 @@ def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, taman
         convexidade = area / hull_area
         if convexidade < 0.5:
             return False
+
+        # Filtro 3 - conteudo HSV minimo (evita fundo preto)
         hsv_rec = cv2.cvtColor(rec_local, cv2.COLOR_BGR2HSV)
         sat_ok = hsv_rec[:, :, 1] > 60
         val_ok = hsv_rec[:, :, 2] > 60
@@ -615,41 +639,14 @@ def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, taman
             return False
         if np.sum(hsv_rec[:, :, 2] > 30) < 0.10 * area_mask:
             return False
+
         return True
 
-    def _refinar_por_amg(rec_local, ratio_original):
-        try:
-            novas = amg.generate(cv2.cvtColor(rec_local, cv2.COLOR_BGR2RGB))
-        except Exception:
-            return None
-        melhor = None
-        melhor_ratio = None
-        for m in novas:
-            seg_loc = m.get("segmentation")
-            if seg_loc is None:
-                continue
-            mask_loc = seg_loc.astype(bool)
-            if not mask_loc.any():
-                continue
-            bbox_loc = _recortar_bbox(mask_loc.astype(np.uint8) * 255)
-            if not bbox_loc:
-                continue
-            xl, yl, wl, hl = bbox_loc
-            x1l = xl + wl
-            y1l = yl + hl
-            mask_crop = mask_loc[yl:y1l, xl:x1l]
-            rec_crop = rec_local[yl:y1l, xl:x1l]
-            if rec_crop.size == 0 or mask_crop.sum() == 0:
-                continue
-            ratio_exc = _calc_exclusao_ratio(mask_crop, cv2.cvtColor(rec_crop, cv2.COLOR_BGR2HSV))
-            if melhor_ratio is None or ratio_exc < melhor_ratio:
-                melhor_ratio = ratio_exc
-                melhor = (mask_crop, rec_crop)
-        if melhor_ratio is None:
-            return None
-        if melhor_ratio >= ratio_original:
-            return None
-        return melhor[0], melhor[1], melhor_ratio
+    def salvar_excluida(rec_local, idx, motivo):
+        nome_arq = f"{base_nome}_comp{idx:02d}_{motivo}.png"
+        caminho = gerar_caminho_unico(os.path.join(pasta_excluidas, nome_arq))
+        cv2.imwrite(caminho, rec_local)
+        return caminho
 
     for idx, mask_data in enumerate(masks, start=1):
         seg = mask_data.get("segmentation")
@@ -658,7 +655,7 @@ def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, taman
         mask_bool = seg.astype(bool)
         if not mask_bool.any():
             continue
-        bbox = _recortar_bbox(mask_bool.astype(np.uint8) * 255)
+        bbox = recortar_bbox(mask_bool.astype(np.uint8) * 255)
         if not bbox:
             continue
         x, y, w, h = bbox
@@ -677,27 +674,24 @@ def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, taman
             continue
 
         mask_rec = mask_bool[y0:y1, x0:x1]
-        if not _avaliar_mask(mask_rec, recorte):
+        if not validar_mascara_componente(mask_rec, recorte):
+            print(f"[separar_componentes_sam] comp {idx}: descartado por filtros basicos")
+            salvar_excluida(recorte, idx, "filtros")
             continue
 
-        # filtro 4: proporcao de exclusao; tenta refinar com AMG local se passar de 15%
+        # filtro 4: proporcao de exclusao; se >10% descarta
         hsv_rec = cv2.cvtColor(recorte, cv2.COLOR_BGR2HSV)
-        ratio_exc = _calc_exclusao_ratio(mask_rec, hsv_rec)
-        print(f"[separar_componentes] comp {idx}: exclusao_ratio={ratio_exc:.3f}")
-        if ratio_exc > 0.15 and paletas:
-            refinado = _refinar_por_amg(recorte, ratio_exc)
-            if refinado is None:
-                print(f"[separar_componentes] comp {idx}: refinado sem melhora, descartado")
-                continue
-            mask_rec, recorte, ratio_ref = refinado
-            print(f"[separar_componentes] comp {idx}: refinado_ratio={ratio_ref:.3f}")
-            if not _avaliar_mask(mask_rec, recorte):
-                continue
+        ratio_exc = calcular_ratio_exclusao(mask_rec, hsv_rec)
+        if ratio_exc > 0.10 and paletas:
+            print(f"[separar_componentes_sam] comp {idx}: descartado por exclusao {ratio_exc:.3f} (>{0.10})")
+            salvar_excluida(recorte, idx, f"exclusao-{ratio_exc:.3f}")
+            continue
 
-        enquadrado = _enquadrar_quadrado(recorte, alvo=tamanho_alvo)
+        enquadrado = enquadrar_em_quadrado(recorte, alvo=tamanho_alvo)
 
         caminho_saida = os.path.join(pasta_destino, f"{base_nome}_comp{idx:02d}.png")
-        caminho_saida = _caminho_unico(caminho_saida)
+        caminho_saida = gerar_caminho_unico(caminho_saida)
+        print(f"[separar_componentes_sam] salvando {os.path.basename(caminho_saida)} ratio_exc={ratio_exc:.3f}")
         cv2.imwrite(caminho_saida, enquadrado)
         salvos.append(caminho_saida)
 
