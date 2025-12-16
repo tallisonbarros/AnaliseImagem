@@ -6,38 +6,54 @@ import FileFunctions
 import tkinter.messagebox as mb
 import numpy as np
 
-# Integracao SAM1 (Segment Anything) com SamPredictor
+# Integracao SAM1 (Segment Anything) com SamAutomaticMaskGenerator
 try:
     import torch
-    from segment_anything import sam_model_registry, SamPredictor, SamAutomaticMaskGenerator
+    from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
     HAS_SAM = True
 except Exception:
     HAS_SAM = False
     sam_model_registry = None
-    SamPredictor = None
     SamAutomaticMaskGenerator = None
     torch = None
 
-# Configuracao SAM + pontos automáticos
+# CNN classificador de quebra (integro/parcial/quebrado)
+try:
+    import cnn_quebra_clf
+    HAS_CNN_QUEBRA = True
+except Exception:
+    HAS_CNN_QUEBRA = False
+    cnn_quebra_clf = None
+
+# controle de notificacao unica sobre qual metodo de quebra foi usado
+_QUEBRA_NOTIFY = None
+
+
+def _notificar_mapa_face(modo: str):
+    """Exibe informacao uma unica vez sobre o metodo utilizado para quebra."""
+    global _QUEBRA_NOTIFY
+    if _QUEBRA_NOTIFY == modo:
+        return
+    _QUEBRA_NOTIFY = modo
+    try:
+        mb.showinfo("Quebra", f"Usando analise: {modo}")
+    except Exception:
+        pass
+
+# Configuracao SAM (AMG)
 SAM_MODEL_TYPE = os.getenv("SAM_MODEL_TYPE", "vit_h")
 SAM_CHECKPOINT = os.getenv("SAM_CHECKPOINT", os.path.join(os.getcwd(), "sam_vit_h_4b8939.pth"))
-SAM_PARAMS = {}  # kwargs extras para SamPredictor
-SAM_AUTO_CFG = {
-    "h_low": 10,
-    "s_low": 80,
-    "v_low": 80,
-    "h_high": 40,
-    "s_high": 255,
-    "v_high": 255,
-    "num_pos": 80,
-    "num_neg": 60,
-    "bg_threshold": 40,
-    "multimask": False,
+SAM_AMG_CFG = {
+    # filtros mais rigorosos para evitar pegar a bandeja/fundo
+    "points_per_side": 24,
+    "pred_iou_thresh": 0.95,
+    "stability_score_thresh": 0.97,
+    "box_nms_thresh": 0.35,
+    "crop_n_layers": 1,
+    "min_mask_region_area": 1500,
 }
-SAM_AMG_CFG = {}
 
 # cache global do predictor
-_SAM_PREDICTOR = None
 _SAM_MODEL = None
 _SAM_AMG = None
 
@@ -135,7 +151,7 @@ def analisar_composicao(img, paletas):
             continue
         cores = list((dados or {}).get("cores", []))
         if not cores and cat_key == "exclusao":
-            # garante referencia para fundo preto (apos remover_fundo) ou transparencia
+            # garante referencia para fundo preto ou transparencias
             cores = [(0, 0, 0)]
         if not cores:
             continue
@@ -287,18 +303,6 @@ def analisar_score(img, paletas, composicao=None, pesos=None):
     return {"score": pred, "metodo": metodo, "composicao": comp}
 
 
-def _gerar_mascara_fg(img_bgr):
-    """Mascara binaria simples: pixels non-zero sao foreground."""
-    if img_bgr is None:
-        return None
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    _, mask = cv2.threshold(gray, 0, 255,
-                             cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
-                             np.ones((3,3), np.uint8))
-    return mask
-
-
 def analisar_quebra(img: ImageFunctions.Imagem):
     """
     Avalia grau de quebra fisica usando metricas morfologicas/geomtricas.
@@ -402,60 +406,26 @@ def analisar_quebra(img: ImageFunctions.Imagem):
     rug_ms = max(0.0, (perim - perim_blur) / max(perim_blur, 1.0))
     rugosidade = min(max(0.7 * rug_base + 0.3 * rug_ms, 0.0), 1.0)
 
-    # mapas internos (micro-IA heuristica)
-    mapas_face = gerar_mapas_face_interna(img, mask_fg, cfg)
-    mapa_int = mapas_face.get("mapa_interno", None)
-    mapa_conf = mapas_face.get("mapa_confianca", None)
+    # CNN classificador (obrigatorio)
+    if not (HAS_CNN_QUEBRA and cnn_quebra_clf is not None):
+        return {"score_quebra": 0.0, "classe": "indefinido", "metricas": {}}
 
-    kernel = np.ones((3, 3), np.uint8)
-    borda = cv2.dilate(mask_fg, kernel, iterations=1) - cv2.erode(mask_fg, kernel, iterations=1)
-    interior = cv2.erode(mask_fg, kernel, iterations=1)
+    try:
+        resultado_cnn = cnn_quebra_clf.classificar_quebra(
+            img.matriz_NumPy,
+            mask_fg=mask_fg
+        )
+    except Exception:
+        resultado_cnn = None
 
-    if mapa_int is not None:
-        m_int = mapa_int.astype(np.float64)
-        peso = mapa_conf.astype(np.float64) if mapa_conf is not None else np.ones_like(m_int, dtype=np.float64)
-        area_interna = float(np.sum(m_int * (mask_fg > 0)))
-        area_total_mask = float(np.sum(mask_fg > 0))
-        perc_area_interna = area_interna / area_total_mask if area_total_mask > 0 else 0.0
-        perc_borda_interna = float(np.sum(m_int * (borda > 0))) / float(np.sum(borda > 0) or 1)
-    else:
-        perc_area_interna = 0.0
-        perc_borda_interna = 0.0
+    if not (resultado_cnn and resultado_cnn.get("classe_id") is not None):
+        return {"score_quebra": 0.0, "classe": "indefinido", "metricas": {}}
 
-    # exposicao via contraste (fallback)
-    gray = cv2.cvtColor(img.matriz_NumPy, cv2.COLOR_BGR2GRAY)
-    borda_vals = gray[borda > 0]
-    interior_vals = gray[interior > 0]
-    if len(borda_vals) and len(interior_vals):
-        borda_mean = float(np.mean(borda_vals))
-        interior_mean = float(np.mean(interior_vals))
-        expo = (borda_mean - interior_mean) / 255.0
-        exposicao = float(np.clip(expo, 0.0, 1.0))
-    else:
-        exposicao = 0.0
-
-    # combinacao linear ajustada (inclui area interna)
-    w_area = cfg["pesos_score"]["area"]
-    w_rugo = cfg["pesos_score"]["rug"]
-    w_frag = cfg["pesos_score"]["frag"]
-    w_exp = cfg["pesos_score"]["exp"]
-    w_int = cfg["pesos_score"]["int"]
-    score = (
-        w_area * area_deficit +
-        w_rugo * rugosidade +
-        w_frag * fragmentacao +
-        w_exp * exposicao +
-        w_int * perc_area_interna
-    )
-    score = float(max(0.0, min(score, 1.0)))
-
-    if score < 0.2:
-        classe = "integro"
-    elif score < 0.5:
-        classe = "parcial"
-    else:
-        classe = "quebrado"
-
+    probs = resultado_cnn.get("probs") or [0.0, 0.0, 0.0]
+    prob_parcial = float(probs[1]) if len(probs) > 1 else 0.0
+    prob_quebrado = float(probs[2]) if len(probs) > 2 else 0.0
+    score_cnn = float(np.clip(0.5 * prob_parcial + prob_quebrado, 0.0, 1.0))
+    classe = ["integro", "parcial", "quebrado"][int(resultado_cnn["classe_id"])]
     metricas = {
         "area": area,
         "area_ref": area_ref,
@@ -470,89 +440,21 @@ def analisar_quebra(img: ImageFunctions.Imagem):
         "fragmentos": frag_count,
         "frag_area_ratio": frag_area_ratio,
         "frag_density": frag_density,
-        "exposicao": exposicao,
-        "perc_area_interna": perc_area_interna,
-        "perc_borda_interna": perc_borda_interna,
+        "cnn_probs": probs,
         "eixo_maior": eixo_maior,
     }
+    _notificar_mapa_face("CNN classificador (integro/parcial/quebrado)")
+    return {"score_quebra": score_cnn, "classe": classe, "metricas": metricas, "cnn": resultado_cnn}
 
-    return {"score_quebra": score, "classe": classe, "metricas": metricas}
 
-
-def gerar_mapas_face_interna(img: ImageFunctions.Imagem, mask_fg=None, cfg=None):
-    """
-    Micro-IA heuristica (leve) para estimar probabilidade de face interna:
-    combina intensidade e gradiente na borda, normalizando por iluminacao.
-    Retorna mapas normalizados [0,1].
-    """
-    if img is None or getattr(img, "matriz_NumPy", None) is None:
-        return {"mapa_interno": None, "mapa_externo": None, "mapa_confianca": None}
-
-    mask = mask_fg if mask_fg is not None else _gerar_mascara_fg(img.matriz_NumPy)
-    if mask is None:
-        return {"mapa_interno": None, "mapa_externo": None, "mapa_confianca": None}
-
-    bgr = img.matriz_NumPy
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-    mask_float = mask.astype(np.float32) / 255.0
-
-    ksize_sobel = cfg["sobel_ksize"] if cfg else 3
-    ksize_grad_blur = cfg["blur_grad_ksize"] if cfg else 3
-    ksize_brilho_blur = cfg["blur_brilho_ksize"] if cfg else 5
-    peso_brilho = cfg["peso_prob_brilho"] if cfg else 0.6
-    peso_grad = cfg["peso_prob_grad"] if cfg else 0.4
-
-    # sobel + blur
-    sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=ksize_sobel)
-    sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=ksize_sobel)
-    grad = cv2.magnitude(sobelx, sobely)
-    grad = cv2.GaussianBlur(grad, (ksize_grad_blur, ksize_grad_blur), 0)
-
-    # normalizacao por iluminacao global (z-score dentro da mascara)
-    vals_mask = gray[mask_float > 0]
-    mean_int = float(np.mean(vals_mask)) if len(vals_mask) else 0.5
-    std_int = float(np.std(vals_mask)) if len(vals_mask) else 0.1
-    std_int = max(std_int, 1e-3)
-    brilhos = cv2.GaussianBlur(gray, (ksize_brilho_blur, ksize_brilho_blur), 0)
-    brilhos_norm = (brilhos - mean_int) / std_int
-    brilhos_norm = 0.5 + 0.5 * np.tanh(brilhos_norm)  # limita [0,1] com suavidade
-
-    grad_vals = grad[mask_float > 0]
-    mean_grad = float(np.mean(grad_vals)) if len(grad_vals) else 0.0
-    std_grad = float(np.std(grad_vals)) if len(grad_vals) else 0.1
-    std_grad = max(std_grad, 1e-3)
-    grad_norm = (grad - mean_grad) / std_grad
-    grad_norm = 0.5 + 0.5 * np.tanh(grad_norm)
-
-    # pesos calibraveis 0.6 / 0.4
-    prob_int = peso_brilho * brilhos_norm + peso_grad * grad_norm
-    prob_int = np.clip(prob_int, 0.0, 1.0)
-
-    # restricao pela mascara
-    prob_int = prob_int * mask_float
-    prob_ext = np.clip(1.0 - prob_int, 0.0, 1.0)
-
-    # fatores de contraste e variancia borda vs interior
-    kernel = np.ones((3, 3), np.uint8)
-    borda = cv2.dilate(mask, kernel, iterations=1) - cv2.erode(mask, kernel, iterations=1)
-    interior = cv2.erode(mask, kernel, iterations=1)
-    borda_vals = gray[borda > 0]
-    interior_vals = gray[interior > 0]
-    if len(borda_vals) and len(interior_vals):
-        diff_mean = (np.mean(borda_vals) - np.mean(interior_vals)) / (std_int + 1e-3)
-        fator_contraste = np.clip(0.5 + 0.5 * np.tanh(diff_mean), 0.0, 1.0)
-        diff_var = (np.var(borda_vals) - np.var(interior_vals)) / (np.var(interior_vals) + 1e-3)
-        fator_var = np.clip(0.5 + 0.5 * np.tanh(diff_var), 0.0, 1.0)
-        prob_int = prob_int * fator_contraste * fator_var
-
-    # confianca: gradiente normalizado dentro da mascara
-    conf = np.clip(grad_norm * mask_float, 0.0, 1.0)
-
-    return {
-        "mapa_interno": prob_int,
-        "mapa_externo": prob_ext,
-        "mapa_confianca": conf,
-    }
+def _gerar_mascara_fg(img_bgr):
+    """Mascara binaria simples: pixels non-zero sao foreground."""
+    if img_bgr is None:
+        return None
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    return mask
 
 
 def _carregar_sam_base():
@@ -570,15 +472,6 @@ def _carregar_sam_base():
     return _SAM_MODEL
 
 
-def _carregar_sam_predictor():
-    global _SAM_PREDICTOR
-    if _SAM_PREDICTOR is not None:
-        return _SAM_PREDICTOR
-    sam_model = _carregar_sam_base()
-    _SAM_PREDICTOR = SamPredictor(sam_model, **SAM_PARAMS)
-    return _SAM_PREDICTOR
-
-
 def _carregar_sam_amg():
     global _SAM_AMG
     if _SAM_AMG is not None:
@@ -588,97 +481,6 @@ def _carregar_sam_amg():
     sam_model = _carregar_sam_base()
     _SAM_AMG = SamAutomaticMaskGenerator(sam_model, **SAM_AMG_CFG)
     return _SAM_AMG
-
-
-def _gerar_pontos_positivos_hsv(img_bgr, cfg):
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    hsv_low = np.array([cfg["h_low"], cfg["s_low"], cfg["v_low"]])
-    hsv_high = np.array([cfg["h_high"], cfg["s_high"], cfg["v_high"]])
-    mask = cv2.inRange(hsv, hsv_low, hsv_high)
-    ys, xs = np.where(mask > 0)
-    if len(xs) == 0:
-        return np.zeros((0, 2), dtype=np.float32)
-    idx = np.random.choice(len(xs), size=min(cfg["num_pos"], len(xs)), replace=False)
-    pts = np.stack([xs[idx], ys[idx]], axis=1).astype(np.float32)
-    return pts
-
-
-def _gerar_pontos_negativos(img_bgr, cfg):
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    bg = gray < cfg["bg_threshold"]
-    ys, xs = np.where(bg)
-    if len(xs) == 0:
-        return np.zeros((0, 2), dtype=np.float32)
-    idx = np.random.choice(len(xs), size=min(cfg["num_neg"], len(xs)), replace=False)
-    pts = np.stack([xs[idx], ys[idx]], axis=1).astype(np.float32)
-    return pts
-
-
-def remover_fundo(imagem: ImageFunctions.Imagem):
-    """
-    Remove o fundo usando SAM1 (SamPredictor) com pontos automáticos:
-    - positivos: HSV (SAM_AUTO_CFG)
-    - negativos: fundo escuro
-    """
-    if imagem is None or getattr(imagem, "matriz_NumPy", None) is None:
-        return None
-
-    cfg = SAM_AUTO_CFG
-
-    try:
-        predictor = _carregar_sam_predictor()
-        bgr_img = imagem.matriz_NumPy
-        predictor.set_image(bgr_img)
-    except Exception as exc:  # noqa: BLE001
-        mb.showerror("SAM nao disponivel", str(exc))
-        return None
-
-    pts_pos = _gerar_pontos_positivos_hsv(bgr_img, cfg)
-    pts_neg = _gerar_pontos_negativos(bgr_img, cfg)
-
-    if len(pts_pos) == 0:
-        mb.showerror("SAM", "Nenhum ponto positivo detectado no intervalo HSV configurado.")
-        return None
-
-    coords = np.concatenate([pts_pos, pts_neg], axis=0) if len(pts_neg) else pts_pos
-    labels = np.concatenate([
-        np.ones(len(pts_pos)),
-        np.zeros(len(pts_neg))
-    ]).astype(np.int32) if len(pts_neg) else np.ones(len(pts_pos), dtype=np.int32)
-
-    try:
-        masks, scores, _ = predictor.predict(
-            point_coords=coords,
-            point_labels=labels,
-            multimask_output=cfg.get("multimask", False)
-        )
-    except Exception as exc:  # noqa: BLE001
-        mb.showerror("SAM", f"Falha ao gerar mascara: {exc}")
-        return None
-
-    if masks is None or len(masks) == 0:
-        mb.showerror("SAM", "Nenhuma mascara retornada.")
-        return None
-
-    idx = int(np.argmax(scores))
-    mask_array = masks[idx].astype(np.bool_)
-    mask_array = mask_array[: imagem.altura, : imagem.largura]
-
-    bgr = imagem.matriz_NumPy.copy()
-    bgr[~mask_array] = (0, 0, 0)
-
-    imagem.matriz_NumPy = bgr
-    imagem.altura, imagem.largura = bgr.shape[:2]
-    imagem.canais = bgr.shape[2] if bgr.ndim == 3 else 1
-    imagem.total_pixels = imagem.altura * imagem.largura
-    imagem.dtype = bgr.dtype
-
-    try:
-        imagem.hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    except Exception:
-        imagem.hsv = None
-
-    return imagem
 
 
 def _recortar_bbox(mask):
@@ -727,7 +529,7 @@ def _caminho_unico(base_path):
         idx += 1
 
 
-def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, tamanho_alvo=2500):
+def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, tamanho_alvo=2500, paletas=None):
     """
     Usa o SAM (AutomaticMaskGenerator) para separar componentes e salva cada um
     como PNG reenquadrado em um quadro quadrado de tamanho_alvo.
@@ -758,6 +560,97 @@ def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, taman
     base_nome = os.path.splitext(imagem.nome)[0]
     salvos = []
 
+    def _calc_exclusao_ratio(mask_local, hsv_local):
+        cores_exc = []
+        for nome, dados in (paletas or {}).items():
+            key = (nome or "").lower()
+            if key in ("exclusao", "fundo"):
+                cores_exc.extend((dados or {}).get("cores", []))
+        if not cores_exc:
+            return 0.0
+        mask_exc = np.zeros(mask_local.shape, dtype=np.uint8)
+        for (H, S, V) in cores_exc:
+            h_delta = int(max(5, H * 0.08))
+            s_delta = int(max(10, S * 0.10))
+            v_delta = int(max(10, V * 0.10))
+            h_min = max(H - h_delta, 0)
+            h_max = min(H + h_delta, 179)
+            s_min = max(S - s_delta, 0)
+            s_max = min(S + s_delta, 255)
+            v_min = max(V - v_delta, 0)
+            v_max = min(V + v_delta, 255)
+            faixa = cv2.inRange(hsv_local, (h_min, s_min, v_min), (h_max, s_max, v_max))
+            mask_exc = cv2.bitwise_or(mask_exc, faixa)
+        inter = np.logical_and(mask_local, mask_exc > 0)
+        return float(np.sum(inter)) / float(max(np.sum(mask_local), 1))
+
+    def _avaliar_mask(mask_local, rec_local):
+        area_total = rec_local.shape[0] * rec_local.shape[1]
+        if area_total == 0:
+            return False
+        area_mask = mask_local.sum()
+        if area_mask < 0.05 * area_total:
+            return False
+        contours, _ = cv2.findContours(
+            mask_local.astype(np.uint8) * 255,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            return False
+        cnt = max(contours, key=cv2.contourArea)
+        hull = cv2.convexHull(cnt)
+        area = cv2.contourArea(cnt)
+        hull_area = cv2.contourArea(hull)
+        if hull_area == 0:
+            return False
+        convexidade = area / hull_area
+        if convexidade < 0.5:
+            return False
+        hsv_rec = cv2.cvtColor(rec_local, cv2.COLOR_BGR2HSV)
+        sat_ok = hsv_rec[:, :, 1] > 60
+        val_ok = hsv_rec[:, :, 2] > 60
+        conteudo = np.logical_and(sat_ok, val_ok)
+        if np.sum(conteudo) < 0.03 * area_total:
+            return False
+        if np.sum(hsv_rec[:, :, 2] > 30) < 0.10 * area_mask:
+            return False
+        return True
+
+    def _refinar_por_amg(rec_local, ratio_original):
+        try:
+            novas = amg.generate(cv2.cvtColor(rec_local, cv2.COLOR_BGR2RGB))
+        except Exception:
+            return None
+        melhor = None
+        melhor_ratio = None
+        for m in novas:
+            seg_loc = m.get("segmentation")
+            if seg_loc is None:
+                continue
+            mask_loc = seg_loc.astype(bool)
+            if not mask_loc.any():
+                continue
+            bbox_loc = _recortar_bbox(mask_loc.astype(np.uint8) * 255)
+            if not bbox_loc:
+                continue
+            xl, yl, wl, hl = bbox_loc
+            x1l = xl + wl
+            y1l = yl + hl
+            mask_crop = mask_loc[yl:y1l, xl:x1l]
+            rec_crop = rec_local[yl:y1l, xl:x1l]
+            if rec_crop.size == 0 or mask_crop.sum() == 0:
+                continue
+            ratio_exc = _calc_exclusao_ratio(mask_crop, cv2.cvtColor(rec_crop, cv2.COLOR_BGR2HSV))
+            if melhor_ratio is None or ratio_exc < melhor_ratio:
+                melhor_ratio = ratio_exc
+                melhor = (mask_crop, rec_crop)
+        if melhor_ratio is None:
+            return None
+        if melhor_ratio >= ratio_original:
+            return None
+        return melhor[0], melhor[1], melhor_ratio
+
     for idx, mask_data in enumerate(masks, start=1):
         seg = mask_data.get("segmentation")
         if seg is None:
@@ -765,15 +658,10 @@ def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, taman
         mask_bool = seg.astype(bool)
         if not mask_bool.any():
             continue
-
-        bbox = mask_data.get("bbox")
-        if bbox:
-            x, y, w, h = map(int, bbox)
-        else:
-            bbox = _recortar_bbox(mask_bool.astype(np.uint8) * 255)
-            if not bbox:
-                continue
-            x, y, w, h = bbox
+        bbox = _recortar_bbox(mask_bool.astype(np.uint8) * 255)
+        if not bbox:
+            continue
+        x, y, w, h = bbox
 
         x0 = max(0, x)
         y0 = max(0, y)
@@ -787,6 +675,24 @@ def separar_componentes(imagem: ImageFunctions.Imagem, pasta_destino: str, taman
         recorte = masked[y0:y1, x0:x1]
         if recorte.size == 0:
             continue
+
+        mask_rec = mask_bool[y0:y1, x0:x1]
+        if not _avaliar_mask(mask_rec, recorte):
+            continue
+
+        # filtro 4: proporcao de exclusao; tenta refinar com AMG local se passar de 15%
+        hsv_rec = cv2.cvtColor(recorte, cv2.COLOR_BGR2HSV)
+        ratio_exc = _calc_exclusao_ratio(mask_rec, hsv_rec)
+        print(f"[separar_componentes] comp {idx}: exclusao_ratio={ratio_exc:.3f}")
+        if ratio_exc > 0.15 and paletas:
+            refinado = _refinar_por_amg(recorte, ratio_exc)
+            if refinado is None:
+                print(f"[separar_componentes] comp {idx}: refinado sem melhora, descartado")
+                continue
+            mask_rec, recorte, ratio_ref = refinado
+            print(f"[separar_componentes] comp {idx}: refinado_ratio={ratio_ref:.3f}")
+            if not _avaliar_mask(mask_rec, recorte):
+                continue
 
         enquadrado = _enquadrar_quadrado(recorte, alvo=tamanho_alvo)
 
