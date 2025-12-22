@@ -53,11 +53,19 @@ class ClassificadorUI:
 
     def _config_root(self):
         self.root.geometry("1100x800")
-        self.root.eval('tk::PlaceWindow . center')
         self.root.configure(bg=BG_COLOR)
         self.root.option_add("*Background", BG_COLOR)
         for c in range(3):
             self.root.columnconfigure(c, weight=1)
+        # Centraliza a janela (usa tamanho atual para evitar posicionar a origem no centro)
+        self.root.update_idletasks()
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x = max((sw - w) // 2, 0)
+        y = max((sh - h) // 2, 0)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def _build_ui(self):
         self._build_header()
@@ -108,7 +116,7 @@ class ClassificadorUI:
         ).pack(fill="x", padx=6, pady=1)
         tk.Checkbutton(
             bloco_opcoes,
-            text="Auto analise ao classificar",
+            text="Auto analisar ao carregar",
             variable=self.auto_analisar_var,
             bg=BG_COLOR,
             activebackground=BG_COLOR,
@@ -224,7 +232,15 @@ class ClassificadorUI:
 
         caminho = pasta.lista_arquivos[0]
         self.img = ImageFunctions.Imagem(caminho)
+        self.pickcolor = None
+        self._reset_analise_labels()  # evita exibir resultados da imagem anterior
         self._atualizar_canvas()
+
+        if self.auto_analisar_var.get():
+            try:
+                self.analisar_imagem()
+            except Exception:
+                pass
 
         self.TxtDirImagem.config(text=self.img.nome)
         self.TxtQtdItens.config(text=f"{pasta.quantidade_arquivos} imagens para classificar.")
@@ -234,7 +250,6 @@ class ClassificadorUI:
         refs = self._require_paletas()
 
         registrar_score = self.registrar_score_var.get()
-        auto_analisar = self.auto_analisar_var.get()
 
         if registrar_score:
             comp = ProcessImageFunctions.calcular_composicao(img, refs)
@@ -265,9 +280,6 @@ class ClassificadorUI:
                 "data_hora": datetime.now().isoformat(timespec="seconds"),
             }
             FileFunctions.registrar_score(registro)
-
-        if auto_analisar:
-            self.analisar_imagem()
 
         pasta = FileFunctions.Pasta(self.dirDataBase, str(score_val))
         if FileFunctions.MoverArquivo(self.img.caminho, pasta.dir).get("ok"):
