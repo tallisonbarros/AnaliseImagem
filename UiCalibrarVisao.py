@@ -1,50 +1,34 @@
-# ------------------- UiCalibrarQuebra.py
+# ------------------- UiCalibrarVisao.py
 import os
 import tkinter as tk
 import tkinter.messagebox as mb
 import FileFunctions
 
 
-class CalibrarQuebra:
+class CalibrarVisao:
     """
-    Placeholder de tela para calibracao de quebra.
-    Permite treinar/gerar o modelo cnn_face_interna.pt a partir de um dataset anotado.
+    Tela para treinar o classificador de visao (notas 1..10).
+    Dataset assume pastas ja rotuladas (1..10).
     """
     def __init__(self, root, base_dir=None, on_back=None):
         self.root = root
         self.base_dir = base_dir
         self.on_back = on_back
         self.root_dir = tk.StringVar(value=self.base_dir or os.getcwd())
-        self.dataset_dir = tk.StringVar()
-        self.output_path = tk.StringVar()
-        self.dataset_out = tk.StringVar()
+        self.dataset_dir = tk.StringVar(value=os.path.join(self.root_dir.get(), "dataset_visao"))
+        self.output_path = tk.StringVar(value=os.path.join(self.root_dir.get(), "cnn_visao.pt"))
         self.epochs = tk.IntVar(value=5)
         self.batch_size = tk.IntVar(value=8)
         self.lr = tk.DoubleVar(value=1e-3)
         self.tamanho = tk.IntVar(value=224)
-        self._status = tk.StringVar(value="Dataset rotulado (0/1/2) -> treinar modelo.")
+        self._status = tk.StringVar(value="Dataset 1..10 -> treinar modelo.")
         self._btn_treinar = None
-        self._atualizar_paths(self.root_dir.get(), criar=True)
         self._montar_ui()
-
-    def _atualizar_paths(self, raiz, criar=False):
-        if not raiz:
-            return
-        raiz_abs = os.path.abspath(raiz)
-        try:
-            ds_base = FileFunctions.ensure_dataset_quebra(raiz_abs) if criar else os.path.join(raiz_abs, "dataset_quebra")
-        except Exception as exc:  # noqa: BLE001
-            mb.showerror("Pasta raiz", f"Erro ao preparar dataset_quebra: {exc}")
-            return
-        self.root_dir.set(raiz_abs)
-        self.dataset_out.set(ds_base)
-        self.dataset_dir.set(ds_base)
-        self.output_path.set(FileFunctions.caminho_modelo_quebra(raiz_abs))
 
     def _montar_ui(self):
         container = tk.Frame(self.root, padx=20, pady=20)
         container.pack(fill="both", expand=True)
-        tk.Label(container, text="Calibrar Quebra", font=("Arial", 14, "bold")).pack(pady=(0, 10))
+        tk.Label(container, text="Treinar Visao (1..10)", font=("Arial", 14, "bold")).pack(pady=(0, 10))
 
         linha_top = tk.Frame(container)
         linha_top.pack(fill="x", pady=(0, 6))
@@ -56,25 +40,18 @@ class CalibrarQuebra:
         tk.Entry(linha_raiz, textvariable=self.root_dir, width=40, state="readonly").pack(side="left", padx=6)
         tk.Button(linha_raiz, text="Pasta raiz", command=self._selecionar_pasta_raiz).pack(side="left")
 
-        # dataset
         linha_ds = tk.Frame(container)
         linha_ds.pack(fill="x", pady=4)
-        tk.Label(linha_ds, text="Pasta dataset (dataset_quebra):").pack(side="left")
+        tk.Label(linha_ds, text="Pasta dataset (1..10):").pack(side="left")
         tk.Entry(linha_ds, textvariable=self.dataset_dir, width=40, state="readonly").pack(side="left", padx=6)
-        tk.Button(linha_ds, text="Criar dataset", command=self._abrir_construtor_dataset).pack(side="left", padx=4)
+        tk.Button(linha_ds, text="Alterar", command=self._selecionar_dataset).pack(side="left", padx=4)
 
-        # saida
         linha_out = tk.Frame(container)
         linha_out.pack(fill="x", pady=4)
         tk.Label(linha_out, text="Saida modelo (.pt):").pack(side="left")
         tk.Entry(linha_out, textvariable=self.output_path, width=40, state="readonly").pack(side="left", padx=6)
-        tk.Label(
-            container,
-            text="Anotador: 0=integro | 1=parcial | 2=quebrado | n=pular | q/Esc=sair",
-            fg="#333"
-        ).pack(pady=(2, 8))
+        tk.Button(linha_out, text="Alterar", command=self._selecionar_saida).pack(side="left", padx=4)
 
-        # parametros
         linha_params = tk.Frame(container)
         linha_params.pack(fill="x", pady=6)
         tk.Label(linha_params, text="Epochs:").pack(side="left")
@@ -95,24 +72,37 @@ class CalibrarQuebra:
         from tkinter import filedialog as fd
         pasta = fd.askdirectory(title="Selecione a pasta raiz")
         if pasta:
-            self._atualizar_paths(pasta, criar=True)
+            self.root_dir.set(pasta)
+            self.dataset_dir.set(os.path.join(pasta, "dataset_visao"))
+            self.output_path.set(os.path.join(pasta, "cnn_visao.pt"))
             self._status.set(f"Pasta raiz definida: {pasta}")
+
+    def _selecionar_dataset(self):
+        from tkinter import filedialog as fd
+        pasta = fd.askdirectory(title="Selecione a pasta do dataset (1..10)")
+        if pasta:
+            self.dataset_dir.set(pasta)
+            self._status.set(f"Dataset: {pasta}")
+
+    def _selecionar_saida(self):
+        from tkinter import filedialog as fd
+        caminho = fd.asksaveasfilename(
+            title="Salvar modelo (.pt)",
+            defaultextension=".pt",
+            filetypes=[("TorchScript", "*.pt"), ("Todos", "*.*")]
+        )
+        if caminho:
+            self.output_path.set(caminho)
 
     def _treinar(self):
         try:
-            import cnn_trainer
+            import cnn_trainer_visao
         except Exception as exc:  # noqa: BLE001
-            mb.showerror("Treino", f"Modulo cnn_trainer nao disponivel: {exc}")
+            mb.showerror("Treino", f"Modulo cnn_trainer_visao nao disponivel: {exc}")
             return
-        if not getattr(cnn_trainer, "HAS_TORCH", False):
+        if not getattr(cnn_trainer_visao, "HAS_TORCH", False):
             mb.showerror("Treino", "PyTorch nao instalado. Instale para treinar o modelo.")
             return
-
-        raiz = self.root_dir.get().strip()
-        if not raiz:
-            mb.showerror("Treino", "Defina a pasta raiz primeiro.")
-            return
-        self._atualizar_paths(raiz, criar=True)
 
         ds = self.dataset_dir.get().strip()
         saida = self.output_path.get().strip()
@@ -131,7 +121,7 @@ class CalibrarQuebra:
 
         def worker():
             try:
-                res = cnn_trainer.treinar_modelo(
+                res = cnn_trainer_visao.treinar_modelo(
                     ds,
                     saida,
                     epochs=max(1, self.epochs.get()),
@@ -150,49 +140,6 @@ class CalibrarQuebra:
                     mb.showerror("Treino", f"Falha: {res.get('erro')}")
                     self._status.set(f"Erro: {res.get('erro')}")
                 self._btn_treinar.config(state="normal")
-
-            self.root.after(0, finalizar)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _abrir_construtor_dataset(self):
-        try:
-            import cnn_trainer
-        except Exception as exc:  # noqa: BLE001
-            mb.showerror("Dataset", f"Modulo cnn_trainer nao disponivel: {exc}")
-            return
-        raiz = self.root_dir.get().strip()
-        if not raiz:
-            mb.showerror("Dataset", "Defina a pasta raiz primeiro.")
-            return
-        self._atualizar_paths(raiz, criar=True)
-        pasta_dest = self.dataset_out.get().strip()
-        from tkinter import filedialog as fd
-        pasta_origem = fd.askdirectory(title="Selecione a pasta com as imagens para rotular")
-        if not pasta_origem:
-            self._status.set("Criacao de dataset cancelada.")
-            return
-        self._status.set("Abrindo construtor de dataset...")
-        self.root.update_idletasks()
-
-        import threading
-
-        def worker():
-            try:
-                cnn_trainer.construir_dataset(pasta_origem, pasta_dest, tamanho=max(32, self.tamanho.get()))
-                msg = f"Dataset gerado em {pasta_dest}"
-                res_ok = True
-            except Exception as exc:  # noqa: BLE001
-                msg = f"Falha: {exc}"
-                res_ok = False
-
-            def finalizar():
-                if res_ok:
-                    mb.showinfo("Dataset", msg)
-                    self.dataset_dir.set(pasta_dest)
-                else:
-                    mb.showerror("Dataset", msg)
-                self._status.set(msg)
 
             self.root.after(0, finalizar)
 

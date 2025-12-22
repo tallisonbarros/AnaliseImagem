@@ -4,10 +4,12 @@ import json
 import os
 import shutil
 import csv
+import threading
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.join(BASE_DIR, "config")
+_SCORES_LOCK = threading.Lock()
 
 
 class Pasta:
@@ -57,7 +59,21 @@ def caminho_config(*partes):
 def ler_json(caminho, default=None):
     try:
         with open(caminho, "r", encoding="utf-8") as arquivo:
-            return json.load(arquivo)
+            try:
+                return json.load(arquivo)
+            except json.JSONDecodeError:
+                arquivo.seek(0)
+                linhas = arquivo.readlines()
+                itens = []
+                for ln in linhas:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        itens.append(json.loads(ln))
+                    except Exception:
+                        continue
+                return itens if itens else default
     except FileNotFoundError:
         return default
     except json.JSONDecodeError:
@@ -90,7 +106,6 @@ def registrar_score(registro, json_path=None, csv_path=None):
     - registro: dict com as chaves desejadas (ex.: arquivo, score, germen, casca, canjica, util, exclusao).
     - json_path/csv_path: caminhos opcionais; se nao informados, usam a pasta config/.
     """
-
     def _fmt_csv_val(v):
         if isinstance(v, (int, float)):
             return f"{v:.4f}".replace(".", ",")
@@ -99,34 +114,44 @@ def registrar_score(registro, json_path=None, csv_path=None):
     json_path = json_path or caminho_scores_json()
     csv_path = csv_path or caminho_scores_csv()
 
-    # garante timestamp padrao
     registro = dict(registro)
-    # compatibilidade: aceita 'nota' e garante 'score'
     if "score" not in registro and "nota" in registro:
         registro["score"] = registro.get("nota")
     if "nota" not in registro and "score" in registro:
         registro["nota"] = registro.get("score")
     registro.setdefault("data_hora", datetime.now().isoformat(timespec="seconds"))
 
-    # JSON (lista acumulada)
-    historico = ler_json(json_path, [])
-    if not isinstance(historico, list):
-        historico = []
-    historico.append(registro)
-    salvar_json(json_path, historico)
+    with _SCORES_LOCK:
+        # JSON/NDJSON append
+        try:
+            os.makedirs(os.path.dirname(json_path), exist_ok=True)
+            # se arquivo existir como lista JSON, migra para NDJSON
+            if os.path.exists(json_path):
+                try:
+                    historico = ler_json(json_path, [])
+                    if isinstance(historico, list):
+                        with open(json_path, "w", encoding="utf-8") as arq:
+                            for item in historico:
+                                arq.write(json.dumps(item, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+            with open(json_path, "a", encoding="utf-8") as arq:
+                arq.write(json.dumps(registro, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
-    # CSV (append com cabecalho quando novo)
-    try:
-        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-        escrever_cabecalho = not os.path.exists(csv_path)
-        linha_csv = {k: _fmt_csv_val(v) for k, v in registro.items()}
-        with open(csv_path, "a", newline="", encoding="utf-8") as arq:
-            writer = csv.DictWriter(arq, fieldnames=list(registro.keys()), delimiter=";")
-            if escrever_cabecalho:
-                writer.writeheader()
-            writer.writerow(linha_csv)
-    except Exception:
-        pass
+        # CSV (append com cabecalho quando novo)
+        try:
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+            escrever_cabecalho = not os.path.exists(csv_path)
+            linha_csv = {k: _fmt_csv_val(v) for k, v in registro.items()}
+            with open(csv_path, "a", newline="", encoding="utf-8") as arq:
+                writer = csv.DictWriter(arq, fieldnames=list(registro.keys()), delimiter=";")
+                if escrever_cabecalho:
+                    writer.writeheader()
+                writer.writerow(linha_csv)
+        except Exception:
+            pass
 
 
 # aliases de compatibilidade
@@ -205,3 +230,20 @@ def listar_conteudo_formatado(diretorio):
     linhas.append("----------------------------------------")
 
     return {"ok": True, "mensagem": "\n".join(linhas)}
+
+
+# --- utilitarios especificos do dataset de quebra ---
+
+def ensure_dataset_quebra(root_dir):
+    """Garante a existencia de dataset_quebra/0/1/2 dentro da raiz informada e retorna o caminho absoluto."""
+    raiz_abs = os.path.abspath(root_dir)
+    ds_base = os.path.join(raiz_abs, "dataset_quebra")
+    os.makedirs(ds_base, exist_ok=True)
+    for cls in ("0", "1", "2"):
+        os.makedirs(os.path.join(ds_base, cls), exist_ok=True)
+    return ds_base
+
+
+def caminho_modelo_quebra(root_dir):
+    """Caminho padrao do modelo de quebra (.pt) dentro da raiz."""
+    return os.path.join(os.path.abspath(root_dir), "cnn_quebra.pt")

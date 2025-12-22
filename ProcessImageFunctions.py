@@ -21,24 +21,20 @@ except Exception:
 try:
     import cnn_quebra_clf
     HAS_CNN_QUEBRA = True
-except Exception:
+except Exception as exc:
     HAS_CNN_QUEBRA = False
     cnn_quebra_clf = None
+    raise RuntimeError(f"Falha ao importar cnn_quebra_clf: {exc}")
 
-# controle de notificacao unica sobre qual metodo de quebra foi usado
-_QUEBRA_NOTIFY = None
+# CNN classificador de visao (nota 1-10)
+try:
+    import cnn_visao_clf
+    HAS_CNN_VISAO = True
+except Exception as exc:
+    HAS_CNN_VISAO = False
+    cnn_visao_clf = None
+    raise RuntimeError(f"Falha ao importar cnn_visao_clf: {exc}")
 
-
-def _notificar_mapa_face(modo: str):
-    """Exibe informacao uma unica vez sobre o metodo utilizado para quebra."""
-    global _QUEBRA_NOTIFY
-    if _QUEBRA_NOTIFY == modo:
-        return
-    _QUEBRA_NOTIFY = modo
-    try:
-        mb.showinfo("Quebra", f"Usando analise: {modo}")
-    except Exception:
-        pass
 
 # Configuracao SAM (AMG)
 SAM_MODEL_TYPE = os.getenv("SAM_MODEL_TYPE", "vit_h")
@@ -56,6 +52,7 @@ SAM_AMG_CFG = {
 # cache global do predictor
 _SAM_MODEL = None
 _SAM_AMG = None
+PESOS_DEFAULT = {"germen": 1.0, "casca": 1.0, "canjica": 1.0, "quebra": 1.0, "visao": 1.0}
 
 
 def contar_pixels_hsv(Imagem, hsv_min, hsv_max):
@@ -123,14 +120,13 @@ def gerar_mascara_por_faixas(hsv_img, faixas):
 
 def calcular_composicao(img, paletas):
     """
-    Classifica cada pixel via KNN no espaco HSV usando as cores de referencia das paletas.
-    Retorna um dict com percentuais por categoria, considerando a maioria entre os K mais proximos.
+    Classifica pixels via KNN no espaco HSV usando as cores de referencia das paletas.
+    Retorna percentuais por categoria; 'exclusao' conta V=0 diretamente.
     """
-    if img is None or paletas is None:
-        return {}
-
-    if getattr(img, "matriz_NumPy", None) is None:
-        return {}
+    if not paletas:
+        raise ValueError("Paletas nao fornecidas para calcular composicao.")
+    if img is None or getattr(img, "matriz_NumPy", None) is None:
+        raise ValueError("Imagem invalida para calcular composicao.")
 
     hsv_img = getattr(img, "hsv", None)
     if hsv_img is None:
@@ -138,78 +134,58 @@ def calcular_composicao(img, paletas):
             hsv_img = cv2.cvtColor(img.matriz_NumPy, cv2.COLOR_BGR2HSV)
             img.hsv = hsv_img
         except Exception:
-            return {}
+            raise RuntimeError("Falha ao converter imagem para HSV.")
 
-    # categorias esperadas (mesmo sem exemplo) para manter chaves no retorno
-    categorias_base = []
-    for categoria in paletas.keys():
-        if not categoria:
-            continue
-        cat_key = categoria.lower()
-        if cat_key in ("fundo", "exclusao"):
-            cat_key = "exclusao"
-        if cat_key == "hsvcor":
-            continue
-        if cat_key not in categorias_base:
-            categorias_base.append(cat_key)
-    if "exclusao" not in categorias_base:
-        categorias_base.append("exclusao")
-    base_resultados = {cat: 0.0 for cat in categorias_base}
-
-    # monta base de exemplos (HSV) por categoria
+    # Normaliza categorias e junta refs
+    categorias_ordem = []
     exemplos = []
     labels = []
-    cat_to_idx = {}
     for categoria, dados in paletas.items():
         if not categoria:
             continue
-        cat_key = categoria.lower()
-        if cat_key in ("fundo", "exclusao"):
-            cat_key = "exclusao"
-        if cat_key == "hsvcor":
+        cat = categoria.lower()
+        if cat in ("fundo", "exclusao"):
+            cat = "exclusao"
+        if cat == "hsvcor":
             continue
         cores = list((dados or {}).get("cores", []))
-        if not cores and cat_key == "exclusao":
-            # garante referencia para fundo preto ou transparencias
-            cores = [(0, 0, 0)]
+        if not cores and cat == "exclusao":
+            cores = [(0, 0, 0)]  # referencia de fundo
         if not cores:
             continue
-        if cat_key not in cat_to_idx:
-            cat_to_idx[cat_key] = len(cat_to_idx)
-        idx = cat_to_idx[cat_key]
+        if cat not in categorias_ordem:
+            categorias_ordem.append(cat)
+        cid = categorias_ordem.index(cat)
         for (H, S, V) in cores:
             exemplos.append((int(H), int(S), int(V)))
-            labels.append(idx)
+            labels.append(cid)
 
-    # considera transparencia/preto como exclusao direta
+    if "exclusao" not in categorias_ordem:
+        categorias_ordem.append("exclusao")
+
+    base_resultados = {cat: 0.0 for cat in categorias_ordem}
+
     pixels = hsv_img.reshape(-1, 3).astype(np.float32)
-    mask_validos = pixels[:, 2] > 0
-    total_pixels_img = len(pixels)
+    total_pixels = len(pixels)
+    if total_pixels == 0:
+        raise RuntimeError("Imagem sem pixels validos para composicao.")
+
+    mask_validos = pixels[:, 2] > 0  # V>0 = nao-fundo
     pixels_validos = pixels[mask_validos]
-    zeros_v = total_pixels_img - len(pixels_validos)
-    if total_pixels_img == 0:
-        return base_resultados
+    zeros_v = total_pixels - len(pixels_validos)
 
     if not exemplos:
         resultados = dict(base_resultados)
-        resultados["exclusao"] = (zeros_v / total_pixels_img) * 100.0
+        resultados["exclusao"] = (zeros_v / total_pixels) * 100.0
         resultados["util"] = 100.0 - resultados["exclusao"]
-        for cat in categorias_base:
-            if cat != "exclusao":
-                resultados.setdefault(cat, 0.0)
         return resultados
 
-    exemplos_arr = np.array(exemplos, dtype=np.float32)
-    labels_arr = np.array(labels, dtype=np.int32)
-    categorias = [None] * len(cat_to_idx)
-    for nome, idx in cat_to_idx.items():
-        categorias[idx] = nome
-
+    exemplos_arr = np.asarray(exemplos, dtype=np.float32)
+    labels_arr = np.asarray(labels, dtype=np.int32)
     k = min(5, len(exemplos_arr))
 
-    # processa em blocos para evitar estouro de memoria
-    bloco = 200000
-    contagem = np.zeros(len(categorias), dtype=np.int64)
+    bloco = 200000  # processa em blocos para economizar memoria
+    contagem = np.zeros(len(categorias_ordem), dtype=np.int64)
 
     ref_h = exemplos_arr[:, 0][None, :]
     ref_s = exemplos_arr[:, 1][None, :]
@@ -219,60 +195,59 @@ def calcular_composicao(img, paletas):
         fim = min(inicio + bloco, len(pixels_validos))
         chunk = pixels_validos[inicio:fim]
 
-        # distancia circular em H e euclidiana em S/V (formas irregulares no HSV)
         dh = np.abs(chunk[:, [0]] - ref_h)
-        dh = np.minimum(dh, 180 - dh) / 180.0
+        dh = np.minimum(dh, 180 - dh) / 180.0  # circular em H
         ds = np.abs(chunk[:, [1]] - ref_s) / 255.0
         dv = np.abs(chunk[:, [2]] - ref_v) / 255.0
         dist = dh * dh + ds * ds + dv * dv
 
         viz_idx = np.argpartition(dist, k - 1, axis=1)[:, :k]
+        viz_dists = np.take_along_axis(dist, viz_idx, axis=1)
         viz_labels = labels_arr[viz_idx]
 
-        votos = np.zeros((len(chunk), len(categorias)), dtype=np.int16)
-        for cid in range(len(categorias)):
-            votos[:, cid] = np.sum(viz_labels == cid, axis=1)
+        # pesos inversamente proporcionais a distancia (zero -> peso maximo)
+        pesos_viz = 1.0 / (np.sqrt(viz_dists) + 1e-6)
+
+        votos = np.zeros((len(chunk), len(categorias_ordem)), dtype=np.float32)
+        for cid in range(len(categorias_ordem)):
+            votos[:, cid] = np.sum(pesos_viz * (viz_labels == cid), axis=1)
 
         vencedores = np.argmax(votos, axis=1)
-        contagem += np.bincount(vencedores, minlength=len(categorias))
+        contagem += np.bincount(vencedores, minlength=len(categorias_ordem))
 
-    idx_exclusao = cat_to_idx.get("exclusao")
-    cont_exclusao_knn = contagem[idx_exclusao] if idx_exclusao is not None else 0
+    idx_exc = categorias_ordem.index("exclusao")
+    cont_exclusao_knn = contagem[idx_exc] if idx_exc is not None else 0
     cont_exclusao_total = cont_exclusao_knn + zeros_v
-    total_util_pixels = max(total_pixels_img - cont_exclusao_total, 0)
+    total_util = max(total_pixels - cont_exclusao_total, 0)
 
     resultados = dict(base_resultados)
-
-    # Percentual relativo ao total (exclusao/util)
-    resultados["exclusao"] = (cont_exclusao_total / total_pixels_img) * 100.0
+    resultados["exclusao"] = (cont_exclusao_total / total_pixels) * 100.0
     resultados["util"] = 100.0 - resultados["exclusao"]
 
-    # Percentual das categorias validas normalizadas para 100% da parte util
-    for i in range(len(categorias)):
-        nome_cat = categorias[i]
+    for cid, nome_cat in enumerate(categorias_ordem):
         if nome_cat == "exclusao":
             continue
-        if total_util_pixels == 0:
-            resultados[nome_cat] = 0.0
-        else:
-            resultados[nome_cat] = (contagem[i] / total_util_pixels) * 100.0
+        resultados[nome_cat] = 0.0 if total_util == 0 else (contagem[cid] / total_util) * 100.0
 
     return resultados
 
 
-def calcular_score(img, paletas, composicao=None, pesos=None):
+def calcular_score(img, paletas, composicao=None, pesos=None, quebra_indice=None, visao_indice=None):
     """
     Camada 2 - modelo estatistico ponderado para estimar score/nota a partir da composicao.
     Usa regressao linear sobre o historico salvo (Classificacoes.json). Se faltar base, usa pesos default.
+    Opcionalmente incorpora o indice de quebra (0-1) como feature adicional.
     """
+    if paletas is None:
+        raise ValueError("Paletas nao fornecidas para calcular score.")
     comp = composicao or calcular_composicao(img, paletas)
-    if not comp:
-        return {"score": 0.0, "metodo": "sem_dados"}
 
     base = FileFunctions.ler_json(FileFunctions.caminho_scores_json(), []) or []
     X = []
     y = []
     for item in base:
+        if not isinstance(item, dict):
+            continue
         score = item.get("score", item.get("nota"))
         if score is None:
             continue
@@ -282,6 +257,10 @@ def calcular_score(img, paletas, composicao=None, pesos=None):
             float(item.get("canjica", 0.0)),
             float(item.get("util", 0.0)),
         ])
+        if quebra_indice is not None:
+            X[-1].append(float(item.get("quebra_indice", item.get("score_quebra", 0.0))) * 100.0)
+        if visao_indice is not None:
+            X[-1].append(float(item.get("visao_indice", item.get("indice_visao", 0.0))) * 10.0)
         y.append(float(score))
 
     feat = np.array([
@@ -290,9 +269,13 @@ def calcular_score(img, paletas, composicao=None, pesos=None):
         float(comp.get("canjica", 0.0)),
         float(comp.get("util", 0.0)),
     ], dtype=np.float64)
+    if quebra_indice is not None:
+        feat = np.append(feat, float(quebra_indice) * 100.0)
+    if visao_indice is not None:
+        feat = np.append(feat, float(visao_indice) * 10.0)
 
     # pesos opcionais para ajustar contribuicao (fallback)
-    pesos_default = {"germen": 0.5, "casca": 0.2, "canjica": 0.3}
+    pesos_default = {"germen": 1.0, "casca": 1.0, "canjica": 1.0, "quebra": 1.0, "visao": 1.0}
     pesos = pesos or pesos_default
 
     if len(X) >= 2:
@@ -313,156 +296,79 @@ def calcular_score(img, paletas, composicao=None, pesos=None):
         num = (
             comp.get("germen", 0.0) * pesos.get("germen", 0.0) +
             comp.get("casca", 0.0) * pesos.get("casca", 0.0) +
-            comp.get("canjica", 0.0) * pesos.get("canjica", 0.0)
+            comp.get("canjica", 0.0) * pesos.get("canjica", 0.0) +
+            (float(quebra_indice) * 100.0 if quebra_indice is not None else 0.0) * pesos.get("quebra", 0.0) +
+            (float(visao_indice) * 10.0 if visao_indice is not None else 0.0) * pesos.get("visao", 0.0)
         )
         media = num / soma_pesos
-        pred = (media / 100.0) * 10.0
+        pred_comp = (media / 100.0) * 10.0
+        pred = pred_comp
         metodo = "ponderado"
 
-    return {"score": pred, "metodo": metodo, "composicao": comp}
+    return {
+        "score": pred,
+        "metodo": metodo,
+        "composicao": comp,
+        "quebra_indice": quebra_indice,
+        "visao_indice": visao_indice
+    }
+
+
+def avaliar_visao(img: ImageFunctions.Imagem):
+    """
+    Avalia nota/indice de visao (1-10) via CNN dedicada.
+    """
+    if img is None or getattr(img, "matriz_NumPy", None) is None:
+        raise ValueError("Imagem invalida para avaliacao de visao.")
+    if not (HAS_CNN_VISAO and cnn_visao_clf is not None):
+        raise RuntimeError("cnn_visao_clf nao carregado.")
+
+    res = cnn_visao_clf.classificar_visao(img.matriz_NumPy)
+    if not res:
+        raise RuntimeError("Retorno vazio de cnn_visao_clf.")
+    probs = res.get("probs") or []
+    indice = float(res.get("indice_visao", 0.0) or res.get("indice", 0.0) or res.get("score", 0.0))
+    if not indice and probs:
+        pesos = np.arange(1, len(probs) + 1, dtype=np.float32)
+        soma_probs = float(np.sum(probs))
+        indice = float(np.dot(pesos, probs) / soma_probs) if soma_probs > 0 else float(np.argmax(probs) + 1)
+    classe = res.get("classe", str(int(round(indice))) if indice else "indefinido")
+    return {"indice_visao": indice, "classe": classe, "probs": probs}
 
 
 def avaliar_quebra(img: ImageFunctions.Imagem):
     """
-    Avalia grau de quebra fisica usando metricas morfologicas/geomtricas.
-    Retorna score (0-1), classificacao qualitativa e metricas auxiliares.
+    Avalia grau de quebra usando o classificador CNN (integro/parcial/quebrado).
+    Retorna score (0-1) e classe textual; depende do modelo CNN.
     """
-    # Calibracao centralizada
-    cfg = {
-        "min_area_frag_abs": 5.0,       # px minimos para considerar fragmento
-        "min_area_frag_rel": 0.005,     # 0.5% da area principal
-        "k_frag_density": 0.8,          # intensidade do score exponencial para densidade de fragmentos
-        "rug_blur_ksize": 5,            # kernel blur para suavizar contorno (rugosidade multiescala)
-        "sobel_ksize": 3,               # kernel sobel para mapas internos
-        "blur_grad_ksize": 3,           # blur no gradiente
-        "blur_brilho_ksize": 5,         # blur na intensidade
-        "peso_prob_brilho": 0.6,        # peso brilho vs gradiente no mapa interno
-        "peso_prob_grad": 0.4,
-        "pesos_score": {                # combinacao final
-            "area": 0.35,
-            "rug": 0.1,
-            "frag": 0.25,
-            "exp": 0.15,
-            "int": 0.15,
-        },
-    }
-
     if img is None or getattr(img, "matriz_NumPy", None) is None:
-        return {"score_quebra": 0.0, "classe": "indefinido", "metricas": {}}
+        raise ValueError("Imagem invalida para avaliacao de quebra.")
+    if not (HAS_CNN_QUEBRA and cnn_quebra_clf is not None):
+        raise RuntimeError("cnn_quebra_clf nao carregado.")
 
     mask = gerar_mascara_fg(img.matriz_NumPy)
     if mask is None:
-        return {"score_quebra": 0.0, "classe": "indefinido", "metricas": {}}
+        raise RuntimeError("Falha ao gerar mascara de foreground.")
 
-    # remove ruidos pequenos e identifica componentes
+    # mantem apenas o maior componente como foreground principal
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if num_labels <= 1:
-        return {"score_quebra": 0.0, "classe": "indefinido", "metricas": {}}
+        raise RuntimeError("Foreground insuficiente para avaliar quebra.")
     areas = stats[1:, cv2.CC_STAT_AREA]
     largest_idx = int(1 + np.argmax(areas))
     mask_fg = np.zeros_like(mask)
     mask_fg[labels == largest_idx] = 255
 
-    # fragmentacao: calcula area de fragmentos fora do principal (apos limiar)
-    main_area = float(stats[largest_idx, cv2.CC_STAT_AREA])
-    min_area_frag = max(cfg["min_area_frag_abs"], cfg["min_area_frag_rel"] * main_area)
-    frag_area = 0.0
-    frag_count = 0
-    for i in range(1, num_labels):
-        if i == largest_idx:
-            continue
-        a = float(stats[i, cv2.CC_STAT_AREA])
-        if a >= min_area_frag:
-            frag_area += a
-            frag_count += 1
-    frag_area_ratio = frag_area / (main_area + frag_area) if (main_area + frag_area) > 0 else 0.0
-    frag_density = frag_count / max(np.sqrt(main_area), 1.0)
-    k_frag = cfg["k_frag_density"]
-    frag_density_score = 1.0 - np.exp(-k_frag * frag_density)
-    fragmentacao = float(np.clip(0.6 * frag_area_ratio + 0.4 * frag_density_score, 0.0, 1.0))
-
-    # contornos e hull
-    contours, hierarchy = cv2.findContours(mask_fg, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return {"score_quebra": 0.0, "classe": "indefinido", "metricas": {}}
-    cnt = max(contours, key=cv2.contourArea)
-    area = float(cv2.contourArea(cnt))
-    if area <= 0:
-        return {"score_quebra": 0.0, "classe": "indefinido", "metricas": {}}
-    perim = float(cv2.arcLength(cnt, True))
-    hull = cv2.convexHull(cnt)
-    hull_area = float(cv2.contourArea(hull))
-    convexidade = area / hull_area if hull_area > 0 else 1.0
-    area_deficit_convex = max(0.0, 1.0 - convexidade)
-
-    # area relativa ao esperado (retangulo minimo)
-    # forma de referencia: elipse ajustada (melhor que retangulo para graos ovais)
-    try:
-        ellipse = cv2.fitEllipse(cnt)
-        (w, h) = ellipse[1]
-    except Exception:
-        rect = cv2.minAreaRect(cnt)
-        (w, h) = rect[1]
-    eixo_maior = float(max(w, h))
-    area_ellipse = float(np.pi * (max(w, 1e-3) * 0.5) * (max(h, 1e-3) * 0.5))
-    area_ref = float(max(area_ellipse, area, 1.0))
-    area_ratio = float(area / area_ref)
-    area_deficit = max(0.0, 1.0 - min(area_ratio, 1.0))
-
-    # rugosidade via perimetro comparado ao hull (bordas abertas/irregulares)
-    hull_perim = float(cv2.arcLength(hull, True))
-    rug_base = max(0.0, (perim - hull_perim) / max(hull_perim, 1.0))
-
-    # rugosidade multiescala: perimetro apos suavizar contorno
-    mask_blur = cv2.GaussianBlur(mask_fg, (cfg["rug_blur_ksize"], cfg["rug_blur_ksize"]), 0)
-    _, mask_blur_bin = cv2.threshold(mask_blur, 0, 255, cv2.THRESH_BINARY)
-    cnt_blur_list, _ = cv2.findContours(mask_blur_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if cnt_blur_list:
-        cnt_blur = max(cnt_blur_list, key=cv2.contourArea)
-        perim_blur = float(cv2.arcLength(cnt_blur, True))
-    else:
-        perim_blur = perim
-    rug_ms = max(0.0, (perim - perim_blur) / max(perim_blur, 1.0))
-    rugosidade = min(max(0.7 * rug_base + 0.3 * rug_ms, 0.0), 1.0)
-
-    # CNN classificador (obrigatorio)
-    if not (HAS_CNN_QUEBRA and cnn_quebra_clf is not None):
-        return {"score_quebra": 0.0, "classe": "indefinido", "metricas": {}}
-
-    try:
-        resultado_cnn = cnn_quebra_clf.classificar_quebra(
-            img.matriz_NumPy,
-            mask_fg=mask_fg
-        )
-    except Exception:
-        resultado_cnn = None
-
-    if not (resultado_cnn and resultado_cnn.get("classe_id") is not None):
-        return {"score_quebra": 0.0, "classe": "indefinido", "metricas": {}}
+    resultado_cnn = cnn_quebra_clf.classificar_quebra(img.matriz_NumPy, mask_fg=mask_fg)
+    if not resultado_cnn or resultado_cnn.get("classe_id") is None:
+        raise RuntimeError("cnn_quebra_clf retornou resultado invalido.")
 
     probs = resultado_cnn.get("probs") or [0.0, 0.0, 0.0]
     prob_parcial = float(probs[1]) if len(probs) > 1 else 0.0
     prob_quebrado = float(probs[2]) if len(probs) > 2 else 0.0
     score_cnn = float(np.clip(0.5 * prob_parcial + prob_quebrado, 0.0, 1.0))
     classe = ["integro", "parcial", "quebrado"][int(resultado_cnn["classe_id"])]
-    metricas = {
-        "area": area,
-        "area_ref": area_ref,
-        "area_ratio": area_ratio,
-        "area_deficit": area_deficit,
-        "area_deficit_convex": area_deficit_convex,
-        "convexidade": convexidade,
-        "perimetro": perim,
-        "hull_perimetro": hull_perim,
-        "rugosidade": rugosidade,
-        "fragmentacao": fragmentacao,
-        "fragmentos": frag_count,
-        "frag_area_ratio": frag_area_ratio,
-        "frag_density": frag_density,
-        "cnn_probs": probs,
-        "eixo_maior": eixo_maior,
-    }
-    _notificar_mapa_face("CNN classificador (integro/parcial/quebrado)")
+    metricas = {"cnn_probs": probs}
     return {"score_quebra": score_cnn, "classe": classe, "metricas": metricas, "cnn": resultado_cnn}
 
 

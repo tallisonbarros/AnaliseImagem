@@ -6,6 +6,7 @@ import FileFunctions
 
 
 def rgb_from_hsv_hex(H, S, V):
+    """Converte HSV (0-179, 0-255, 0-255) para string HEX."""
     r, g, b = colorsys.hsv_to_rgb(H / 179.0, S / 255.0, V / 255.0)
     r = int(r * 255)
     g = int(g * 255)
@@ -13,7 +14,8 @@ def rgb_from_hsv_hex(H, S, V):
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def exibir_canvas(canvas, pil_image, zoom, pan_x, pan_y):
+def renderizar_canvas(canvas, pil_image, zoom, pan_x, pan_y):
+    """Desenha a imagem no canvas aplicando zoom/pan e retorna o PhotoImage."""
     largura = int(pil_image.width * zoom)
     altura = int(pil_image.height * zoom)
 
@@ -38,7 +40,7 @@ class PaletaMetaDados:
         self.refs = self._carregar_paleta()
 
     def criar_paletas(self, frame_pai):
-        bloco = tk.LabelFrame(frame_pai, text="Categorias analisadas", font=("Arial", 10, "bold"))
+        bloco = tk.LabelFrame(frame_pai, text="Composição analisada", font=("Arial", 10, "bold"))
         bloco.pack(pady=10)
 
         for nome in self.categorias:
@@ -55,45 +57,35 @@ class PaletaMetaDados:
             frame_cores = tk.Frame(linha)
             frame_cores.pack(side="left", padx=5)
 
-            btn_add = tk.Button(
+            tk.Button(
                 linha,
                 text="+",
                 width=2,
                 command=lambda n=nome_low: self.cadastrar_cor(n)
-            )
-            btn_add.pack(side="left", padx=2)
+            ).pack(side="left", padx=2)
 
-            btn_del = tk.Button(
+            tk.Button(
                 linha,
                 text="-",
                 width=2,
                 command=lambda n=nome_low: self.remover_ultima_cor(n)
-            )
-            btn_del.pack(side="left", padx=2)
+            ).pack(side="left", padx=2)
 
             self.refs[nome_low]["frame_cores"] = frame_cores
 
             for (H, S, V) in self.refs[nome_low]["cores"]:
                 cor_hex = rgb_from_hsv_hex(H, S, V)
-                tk.Label(
-                    frame_cores,
-                    bg=cor_hex,
-                    width=2,
-                    height=1,
-                    relief="ridge"
-                ).pack(side="left", padx=1)
+                tk.Label(frame_cores, bg=cor_hex, width=2, height=1, relief="ridge").pack(side="left", padx=1)
 
         frame_pick = tk.Frame(bloco)
         frame_pick.pack(pady=5)
 
-        # Canvas pequeno com um circulo preenchido para exibir a cor escolhida
+        # Canvas de preview da cor selecionada
         self.HSVcor = tk.Canvas(frame_pick, width=26, height=26, highlightthickness=0, highlightbackground="#000000")
         self._hsv_circle = self.HSVcor.create_oval(3, 3, 23, 23, fill="#000000", outline="#000000", width=2)
         self.HSVcor.pack()
 
-        # inicializa com preto
         self.atualizar_cor_preview("#000000")
-
         return self.refs
 
     def _carregar_paleta(self):
@@ -131,17 +123,19 @@ class PaletaMetaDados:
 
     def cadastrar_cor(self, categoria):
         hsv = self.get_pickcolor()
-        if hsv is None or categoria not in self.refs:
-            return
+        if hsv is None:
+            raise ValueError("Nenhuma cor selecionada para cadastro.")
+        if categoria not in self.refs:
+            raise ValueError("Categoria invalida para cadastrar cor.")
+        frame = self.refs[categoria].get("frame_cores")
+        if frame is None:
+            raise RuntimeError("Frame de cores nao inicializado para a categoria.")
 
         H, S, V = map(int, hsv)
         self.refs[categoria]["cores"].append((H, S, V))
 
         cor_hex = rgb_from_hsv_hex(H, S, V)
-        tk.Label(
-            self.refs[categoria]["frame_cores"],
-            bg=cor_hex, width=2, height=1, relief="ridge"
-        ).pack(side="left", padx=1)
+        tk.Label(frame, bg=cor_hex, width=2, height=1, relief="ridge").pack(side="left", padx=1)
         self._salvar_paleta()
 
         if self.on_change:
@@ -149,19 +143,21 @@ class PaletaMetaDados:
 
     def remover_ultima_cor(self, categoria):
         if categoria not in self.refs:
-            return
+            raise ValueError("Categoria invalida para remover cor.")
 
         lista = self.refs[categoria].get("cores", [])
         if not lista:
-            return
+            raise ValueError("Nenhuma cor cadastrada para remover.")
 
         lista.pop()
 
         frame = self.refs[categoria].get("frame_cores")
-        if frame:
-            filhos = frame.winfo_children()
-            if filhos:
-                filhos[-1].destroy()
+        if frame is None:
+            raise RuntimeError("Frame de cores nao inicializado para a categoria.")
+        filhos = frame.winfo_children()
+        if not filhos:
+            raise RuntimeError("Nenhum widget de cor encontrado para remover.")
+        filhos[-1].destroy()
 
         self._salvar_paleta()
 
@@ -179,7 +175,7 @@ class CanvasNavigator:
         self.img_original = None   # PIL.Image
         self.img_tk = None         # ImageTk.PhotoImage
 
-        # posição inicial do pan (evita AttributeError)
+        # posicao inicial do pan (evita AttributeError)
         self._px = 0
         self._py = 0
 
@@ -196,7 +192,7 @@ class CanvasNavigator:
         ch = self.canvas.winfo_height()
         iw, ih = pil_image.size
 
-        escala = min(cw / iw, ch / ih, 1.0)  
+        escala = min(cw / iw, ch / ih, 1.0)
 
         self.zoom = escala
         self.pan_x = 0
@@ -208,7 +204,7 @@ class CanvasNavigator:
     def _redraw(self):
         if self.img_original is None:
             return
-        self.img_tk = exibir_canvas(
+        self.img_tk = renderizar_canvas(
             self.canvas,
             self.img_original,
             self.zoom,
@@ -224,10 +220,7 @@ class CanvasNavigator:
             self.zoom *= 1.1
         else:
             novo_zoom = self.zoom / 1.1
-            if novo_zoom < self.min_zoom:
-                self.zoom = self.min_zoom
-            else:
-                self.zoom = novo_zoom
+            self.zoom = self.min_zoom if novo_zoom < self.min_zoom else novo_zoom
 
         self._redraw()
 
@@ -251,16 +244,12 @@ class CanvasNavigator:
         self._redraw()
 
     def canvas_to_image_coords(self, x_canvas, y_canvas):
-        if self.img_original is None:
+        if self.img_original is None or self.zoom == 0:
             return None
 
         x_zoom = x_canvas - self.pan_x
         y_zoom = y_canvas - self.pan_y
-
         if x_zoom < 0 or y_zoom < 0:
-            return None
-
-        if self.zoom == 0:
             return None
 
         x = int(x_zoom / self.zoom)

@@ -54,18 +54,20 @@ def classificar_quebra(img_bgr, mask_fg=None, model_path=None):
     """
     Classifica imagem inteira: 0=integro, 1=parcial, 2=quebrado.
     Retorna dict {classe_id, classe_nome, probs(list)}.
-    Se modelo/torch indisponivel, retorna None.
+    Se modelo/torch indisponivel, lanca erro.
     """
-    if img_bgr is None or not HAS_TORCH:
-        return None
+    if img_bgr is None:
+        raise ValueError("Imagem obrigatoria para classificar quebra.")
+    if not HAS_TORCH:
+        raise RuntimeError("Torch nao disponivel para classificar quebra.")
 
     modelo = _carregar_modelo(model_path=model_path)
     if modelo is None:
-        return None
+        raise RuntimeError("Modelo de quebra nao carregado.")
 
     h, w = img_bgr.shape[:2]
     if h == 0 or w == 0:
-        return None
+        raise ValueError("Imagem com dimensoes invalidas para classificar quebra.")
 
     mask = mask_fg if mask_fg is not None else np.ones((h, w), dtype=np.uint8) * 255
     mask_bool = mask.astype(bool)
